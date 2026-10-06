@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-/// Havelin v2 chrome colors, as `0xRRGGBB`.
+/// Application chrome colors, as `0xRRGGBB`.
 pub mod palette {
     pub const PAGE: u32 = 0x030303;
     pub const PANEL: u32 = 0x090907;

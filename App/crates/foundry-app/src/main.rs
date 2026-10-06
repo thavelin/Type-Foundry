@@ -145,11 +145,15 @@ mod shortcut {
     use std::path::PathBuf;
     use std::process::Command;
 
-    const TARGET: &str =
-        r"C:\Users\Troy Havelin\AppData\Local\typefoundry-target\release\typefoundry.exe";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub fn ensure() {
+        let Ok(target) = std::env::current_exe() else {
+            return;
+        };
+        let Some(dir) = target.parent() else {
+            return;
+        };
         let Some(appdata) = std::env::var_os("APPDATA") else {
             return;
         };
@@ -168,8 +172,8 @@ mod shortcut {
              $s.IconLocation = {target} + ',0'; \
              $s.Save()",
             link = quote(&link.to_string_lossy()),
-            target = quote(TARGET),
-            dir = quote(r"C:\Users\Troy Havelin\AppData\Local\typefoundry-target\release"),
+            target = quote(&target.to_string_lossy()),
+            dir = quote(&dir.to_string_lossy()),
         );
         let result = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])

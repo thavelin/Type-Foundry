@@ -233,7 +233,7 @@ Claude Desktop (`claude_desktop_config.json`) or Cursor (`.cursor/mcp.json`):
 {
   "mcpServers": {
     "typefoundry": {
-      "command": "C:/Users/Troy Havelin/AppData/Local/typefoundry-target/release/foundry-mcp.exe",
+      "command": "/path/to/foundry-mcp",
       "args": []
     }
   }
@@ -243,7 +243,7 @@ Claude Desktop (`claude_desktop_config.json`) or Cursor (`.cursor/mcp.json`):
 Claude Code:
 
 ```text
-claude mcp add typefoundry -- "C:/Users/Troy Havelin/AppData/Local/typefoundry-target/release/foundry-mcp.exe"
+claude mcp add typefoundry -- /path/to/foundry-mcp
 ```
 
 Build it first, from `App/`: `cargo build --release -p foundry-mcp`. Pass tool paths with forward slashes, for example `{"path":"C:/fonts/Wide.ufo"}`.

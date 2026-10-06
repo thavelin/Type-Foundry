@@ -34,11 +34,8 @@ Blend is linear interpolation. Both fonts need the same glyph names, contour cou
 ## Layout
 
 - `App/` — Rust workspace. `foundry-core` holds the font, `foundry-api` runs commands, `foundry-cli` is the `foundry` binary, `foundry-app` is the `typefoundry` window, `foundry-mcp` is the MCP server.
-- `Agent/CONTEXT.md` — project facts and the session log.
 - `documents/api.md` — the command contract.
 - `Design/` — the window and its chrome.
-
-Build output goes to `C:\Users\Troy Havelin\AppData\Local\typefoundry-target` because this share creates files without execute permission.
 
 From `App/`:
 
@@ -48,7 +45,3 @@ cargo run -p foundry-app --release
 cargo build --release -p foundry-mcp
 powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
-
-Remote: `git@github.com:thavelin/Type-Foundry.git`
-
-Hub: https://app.notion.com/p/3ef627d6cfdc81e4a936e4f714b7aff0
