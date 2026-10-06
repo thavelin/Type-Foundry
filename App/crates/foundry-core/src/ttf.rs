@@ -603,7 +603,7 @@ fn name_table(font: &Font) -> Vec<u8> {
     let (legacy_family, legacy_style) = font.legacy_names();
     let family = utf16_be(&legacy_family);
     let style = utf16_be(&legacy_style);
-    let unique = utf16_be(&format!("Havelin: {}", font.full_name()));
+    let unique = utf16_be(&format!("Type Foundry: {}", font.full_name()));
     let full = utf16_be(&font.full_name());
     let version = utf16_be(VERSION_STRING);
     let postscript = utf16_be(&postscript_name(&font.file_stem()));

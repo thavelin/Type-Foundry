@@ -19,7 +19,7 @@ Every format is read into, and written from, the same `typefoundry.font` model. 
 
 ## SVG glyphs
 
-Point File > Open SVG folder… at a directory of filled outlines, or pass that directory to `foundry info`. Each file name is the Unicode scalar in four hex digits. A folder named `SVG` takes the parent folder's name, so `Vostok-Serif/SVG` opens as Vostok Serif.
+Point File > Open SVG folder… at a directory of filled outlines, or pass that directory to `foundry info`. Each file name is the Unicode scalar in four hex digits. A folder named `SVG` takes the parent folder's name, so `Example-Family/SVG` opens as Example Family.
 
 The letters are lined up from the drawings. Flat letters sit on one baseline. Round letters keep a little overshoot above and below the x-height or the cap height. Descenders hang below the baseline. The flat lowercase x-height becomes 500 units in a 1000-unit em, and the cap height, ascender, and descender are read from H, the ascenders, and the descenders. A missing space is added at 250 units. Each tight crop gets 40 units of sidebearing on both sides. A stroke that was not expanded to a fill is refused.
 

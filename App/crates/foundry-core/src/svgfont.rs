@@ -913,60 +913,14 @@ mod tests {
     #[test]
     fn an_svg_folder_uses_the_parent_name() {
         let root = std::env::temp_dir().join(format!("typefoundry-svg-{}", std::process::id()));
-        let dir = root.join("Vostok-Serif").join("SVG");
+        let dir = root.join("Example-Family").join("SVG");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("0078.svg"), box_svg(10.0, 25.0)).unwrap();
         fs::write(dir.join("0048.svg"), box_svg(20.0, 37.0)).unwrap();
         let font = Font::load(&dir).unwrap();
-        assert_eq!(font.name, "Vostok Serif");
+        assert_eq!(font.name, "Example Family");
         assert!(font.glyph("x").is_some());
         assert!(font.glyph("H").is_some());
         let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn vostok_serif_sits_on_a_baseline_when_the_folder_is_here() {
-        let path = Path::new(r"T:\troy-freeform\Fonts\Vostok-Serif\SVG");
-        if !path.is_dir() {
-            return;
-        }
-        let font = Font::load(path).unwrap();
-        assert_eq!(font.name, "Vostok Serif");
-        assert_eq!(font.upm, 1000);
-        assert_eq!(font.glyphs.len(), 91);
-        assert!(
-            (font.metrics.x_height - 500.0).abs() < 20.0,
-            "{}",
-            font.metrics.x_height
-        );
-        assert!(font.metrics.cap_height > font.metrics.x_height + 150.0);
-        let (x0, x1) = span(&font, "x");
-        assert!(near(x0, 0.0), "x bottom {x0}");
-        assert!(
-            (x1 - font.metrics.x_height).abs() < 20.0,
-            "x top {x1} x-height {}",
-            font.metrics.x_height
-        );
-        let (h0, h1) = span(&font, "H");
-        assert!(near(h0, 0.0), "H bottom {h0}");
-        assert!(
-            (h1 - font.metrics.cap_height).abs() < 20.0,
-            "H top {h1} cap {}",
-            font.metrics.cap_height
-        );
-        let (o0, o1) = span(&font, "o");
-        assert!(o0 < -1.0, "o overshoot {o0}");
-        assert!(o1 > font.metrics.x_height, "o top {o1}");
-        let (p0, p1) = span(&font, "p");
-        assert!(p0 < -80.0, "p descender {p0}");
-        assert!(p1 > font.metrics.x_height - 5.0, "p top {p1}");
-        assert!(font.metrics.descender < -80.0, "{}", font.metrics.descender);
-        let (dot0, dot1) = span(&font, ".");
-        assert!(near(dot0, 0.0), "period {dot0}");
-        assert!(dot1 < 150.0, "period height {dot1}");
-        let (comma0, _) = span(&font, ",");
-        assert!(comma0 < -1.0, "comma {comma0}");
-        assert_eq!(font.glyph("A").unwrap().unicode, Some(0x41));
-        assert!(font.glyph("space").unwrap().contours.is_empty());
     }
 }
