@@ -12,7 +12,7 @@ Every format is read into, and written from, the same `typefoundry.font` model. 
 | `.otf` (OpenType CFF or CFF2) | yes | no | Cubic outlines come in as two off-curve points. |
 | `.ttc`, `.otc` (collections) | face 0 | no | Other faces are not read yet. |
 | `.woff` (WOFF 1) | yes | no | Tables are inflated and rebuilt into an sfnt, then read like `.ttf` or `.otf`. |
-| `.woff2` | refused | no | The error says to convert it to `.ttf` or `.otf` first. |
+| `.woff2` | yes | no | Unpacked with `wuff`, then read like `.ttf`. A damaged file is named in the error. |
 | SVG folder | yes | no | One filled SVG per character, named with four hex digits (`0041.svg` is A). Save the result as `.json`, `.ufo`, or `.ttf`. |
 
 `ttf-parser` 0.25 reads binary fonts. It was already in the workspace as the export test reader. WOFF 1 is the same tables inside a zlib wrapper, so `flate2` inflates them and the importer rebuilds a normal sfnt before the parser reads it. The parser draws outlines through a pen, so the importer collects `move`, `line`, `quad`, `curve`, and `close` into closed contours. Reading the `post` table in one pass keeps a 45,000-glyph CJK collection to about a third of a second. The parser's own name lookup is quadratic.

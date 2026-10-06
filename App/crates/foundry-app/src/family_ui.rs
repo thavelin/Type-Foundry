@@ -295,6 +295,7 @@ impl FoundryWindow {
         let response = self.run(Command::SaveFamily {
             path: path.to_string_lossy().into_owned(),
             ids: Some(members.clone()),
+            force: true,
         });
         let Some(data) = response.data.filter(|_| response.ok) else {
             return;
@@ -319,8 +320,7 @@ impl FoundryWindow {
         let Some(dir) = self.file_dialog().pick_folder() else {
             return;
         };
-        let command =
-            json!({ "op": "export_family", "dir": dir.to_string_lossy(), "format": format });
+        let command = json!({ "op": "export_family", "dir": dir.to_string_lossy(), "format": format, "force": true });
         let Ok(command) = serde_json::from_value::<Command>(command) else {
             return;
         };

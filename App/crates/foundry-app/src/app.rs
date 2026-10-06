@@ -567,6 +567,7 @@ impl FoundryWindow {
             return;
         }
         self.remember_dir(&path);
+        self.settings.remember_recent(&path);
         if let Some(id) = response.data.as_ref().and_then(|data| data["id"].as_u64()) {
             self.paths.insert(id as u32, path.clone());
         }
@@ -591,9 +592,11 @@ impl FoundryWindow {
     pub fn save_to(&mut self, path: PathBuf) {
         let response = self.run(Command::Save {
             path: path.to_string_lossy().into_owned(),
+            force: true,
         });
         if response.ok {
             self.remember_dir(&path);
+            self.settings.remember_recent(&path);
             self.status = (format!("Saved {}", path.display()), Tone::Done);
             if let Some(id) = self.active {
                 self.paths.insert(id, path);
@@ -885,6 +888,28 @@ impl FoundryWindow {
                 if item(ui, "Open SVG folder…", "", true) {
                     self.open_svg_dialog();
                 }
+                ui.menu_button("Open recent", |ui| {
+                    let recent = self.settings.recent.clone();
+                    if recent.is_empty() {
+                        ui.add_enabled(false, egui::Label::new("No recent files"));
+                    }
+                    for path in &recent {
+                        let label = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        let exists = path.exists();
+                        if item(ui, &label, "", exists) {
+                            self.open(path.clone());
+                        }
+                    }
+                    if !recent.is_empty() {
+                        ui.separator();
+                        if item(ui, "Clear list", "", true) {
+                            self.settings.recent.clear();
+                        }
+                    }
+                });
                 if item(ui, "Open family…", "", true) {
                     self.open_family_dialog();
                 }
@@ -1039,6 +1064,11 @@ impl FoundryWindow {
                     self.view = None;
                 }
                 ui.checkbox(&mut self.settings.show_guides, "Guides");
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    ui.selectable_value(&mut self.settings.dark_canvas, false, "White");
+                    ui.selectable_value(&mut self.settings.dark_canvas, true, "Black");
+                });
                 ui.separator();
                 ui.checkbox(&mut self.settings.fill, "Fill");
                 ui.checkbox(&mut self.settings.outline, "Outline stroke");

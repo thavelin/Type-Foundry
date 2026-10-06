@@ -119,6 +119,25 @@ impl Server {
             "family_open" => "open_family",
             "family_save" => "save_family",
             "family_export" => "export_family",
+            "info_set" => "set_info",
+            "kern_set" => "set_kerning",
+            "kern_add" => "add_kern",
+            "group_set" => "set_group",
+            "ligature_add" => "add_ligature",
+            "features_set" => "set_features",
+            "path_offset" => "offset",
+            "path_stroke" => "stroke",
+            "sidebearing_set" => "set_sidebearing",
+            "outline_check" => "check_outlines",
+            "spacing_check" => "check_spacing",
+            "font_diff" => "diff",
+            "font_proof" => "proof",
+            "glyph_move" => "move_glyph",
+            "family_copy" => "copy_family",
+            "undo" => "undo",
+            "redo" => "redo",
+            "width_scale" => "scale_width",
+            "slant" => "slant",
             other => return Err((INVALID_PARAMS, format!("unknown tool {other}"))),
         };
 
@@ -250,7 +269,7 @@ fn tool_list() -> Value {
     });
     let name = json!({ "type": "string", "description": "Glyph name." });
     let none = json!({ "type": "object", "properties": {} });
-    json!([
+    let mut tools = match json!([
         {
             "name": "font_create",
             "description": "Start an empty font in the session.",
@@ -274,12 +293,18 @@ fn tool_list() -> Value {
         },
         {
             "name": "font_save",
-            "description": "Save the open font to local disk. Without a path, saves to the last path opened or saved by this server.",
-            "inputSchema": { "type": "object", "properties": { "path": path } }
+            "description": "Save the open font to local disk. Without a path, saves to the last path opened or saved by this server. Refuses to replace an existing file unless force is true, and then keeps the previous file as name.bak.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": path,
+                    "force": { "type": "boolean", "default": false }
+                }
+            }
         },
         {
             "name": "font_info",
-            "description": "Name, units per em, vertical metrics, and glyph names of the open font.",
+            "description": "Name, units per em, vertical metrics, style, name-table fields, coverage, kerning counts, and glyph names of the open font.",
             "inputSchema": none
         },
         {
@@ -329,7 +354,8 @@ fn tool_list() -> Value {
                     "a": path,
                     "b": path,
                     "t": { "type": "number", "default": 0.5 },
-                    "out": path
+                    "out": path,
+                    "force": { "type": "boolean", "default": false }
                 },
                 "required": ["a", "b", "out"]
             }
@@ -363,7 +389,8 @@ fn tool_list() -> Value {
                     "style": { "type": "string" },
                     "weight": { "type": "integer", "minimum": 1, "maximum": 1000 },
                     "italic": { "type": "boolean" },
-                    "italic_angle": { "type": "number" }
+                    "italic_angle": { "type": "number" },
+                    "width": { "type": "integer", "minimum": 1, "maximum": 9, "description": "OS/2 width class. 1 is ultra-condensed, 5 is normal, 9 is ultra-expanded." }
                 }
             }
         },
@@ -424,7 +451,10 @@ fn tool_list() -> Value {
             "description": "Save every open style of the active font's family as Family-Style.json beside a .family.json file at path.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "path": path },
+                "properties": {
+                    "path": path,
+                    "force": { "type": "boolean", "default": false }
+                },
                 "required": ["path"]
             }
         },
@@ -435,12 +465,249 @@ fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "dir": path,
-                    "format": { "type": "string", "enum": ["ttf", "ufo", "json"] }
+                    "format": { "type": "string", "enum": ["ttf", "ufo", "json"] },
+                    "force": { "type": "boolean", "default": false }
                 },
                 "required": ["dir", "format"]
             }
         }
-    ])
+    ]) {
+        Value::Array(items) => items,
+        other => vec![other],
+    };
+    if let Value::Array(more) = json!([
+        {
+            "name": "info_set",
+            "description": "Set name-table fields on the open font: copyright, designer, license, license URL, version, a four-character vendor id, and the unique id. Empty strings clear a field. Omitted fields stay as they are.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "copyright": { "type": "string" },
+                    "designer": { "type": "string" },
+                    "license": { "type": "string" },
+                    "license_url": { "type": "string" },
+                    "version": { "type": "string" },
+                    "vendor": { "type": "string" },
+                    "unique_id": { "type": "string" }
+                }
+            }
+        },
+        {
+            "name": "kern_set",
+            "description": "Replace the open font's kerning groups, pairs, and ligatures. An empty object clears them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kerning": {
+                        "type": "object",
+                        "properties": {
+                            "groups": { "type": "object" },
+                            "pairs": { "type": "array" },
+                            "ligatures": { "type": "array" }
+                        }
+                    }
+                },
+                "required": ["kerning"]
+            }
+        },
+        {
+            "name": "kern_add",
+            "description": "Set one kerning pair. left and right are glyph names or group names such as public.kern1.round.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "left": { "type": "string" },
+                    "right": { "type": "string" },
+                    "value": { "type": "number" }
+                },
+                "required": ["left", "right", "value"]
+            }
+        },
+        {
+            "name": "group_set",
+            "description": "Set one kerning group. Use a public.kern1 name for the left side and public.kern2 for the right side.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "members": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["name", "members"]
+            }
+        },
+        {
+            "name": "ligature_add",
+            "description": "Add a ligature, such as glyphs f and i becoming fi. It is written to UFO features and to a GSUB liga lookup in a TTF.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "glyphs": { "type": "array", "items": { "type": "string" } },
+                    "name": { "type": "string" }
+                },
+                "required": ["glyphs", "name"]
+            }
+        },
+        {
+            "name": "features_set",
+            "description": "Replace the OpenType feature text. Omit text to keep a UFO's features.fea. An empty string clears it.",
+            "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } }
+        },
+        {
+            "name": "path_offset",
+            "description": "Thicken or thin outlines. horizontal and vertical are separate, so stems can grow more than hairlines. Existing points move and none are added, which keeps the font compatible for blending. add_points with corner round is the one exception: sharp outside corners become arcs, which adds points. keep_metrics leaves the baseline, x-height, and cap height. preview returns the outlines and does not change the font.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "horizontal": { "type": "number", "default": 0 },
+                    "vertical": { "type": "number", "default": 0 },
+                    "gap": { "type": "number", "default": 0, "description": "Stop growth when edges are this close. 0 disables the limit." },
+                    "corner": { "type": "string", "enum": ["miter", "round", "angle"], "default": "angle" },
+                    "sidebearing": { "type": "boolean", "default": false },
+                    "keep_metrics": { "type": "boolean", "default": true },
+                    "add_points": { "type": "boolean", "default": false, "description": "Draw round joins as arcs. Needs corner round. Changes the point count." },
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "preview": { "type": "boolean", "default": false }
+                }
+            }
+        },
+        {
+            "name": "path_stroke",
+            "description": "Make an outline or inline style from the same offset. Each contour becomes two, so the result does not blend with the original master.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["outline", "inline"] },
+                    "horizontal": { "type": "number", "default": 0 },
+                    "vertical": { "type": "number", "default": 0 },
+                    "gap": { "type": "number", "default": 0 },
+                    "corner": { "type": "string", "enum": ["miter", "round", "angle"], "default": "angle" },
+                    "sidebearing": { "type": "boolean", "default": false },
+                    "keep_metrics": { "type": "boolean", "default": true },
+                    "add_points": { "type": "boolean", "default": false, "description": "Draw round joins as arcs. Needs corner round." },
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "preview": { "type": "boolean", "default": false }
+                },
+                "required": ["kind"]
+            }
+        },
+        {
+            "name": "sidebearing_set",
+            "description": "Set one glyph's left or right sidebearing. family true applies it to every open style of the family, with one undo step on each style.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": name,
+                    "side": { "type": "string", "enum": ["left", "right"] },
+                    "value": { "type": "number" },
+                    "family": { "type": "boolean", "default": false }
+                },
+                "required": ["name", "side", "value"]
+            }
+        },
+        {
+            "name": "outline_check",
+            "description": "Flag self-intersections, kinks, wrong contour direction, missing overshoot, and glyphs that sit off the baseline or cap height.",
+            "inputSchema": none
+        },
+        {
+            "name": "spacing_check",
+            "description": "Measure sidebearings along the italic slant and flag pairs closer than min_gap.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "min_gap": { "type": "number", "default": 0 },
+                    "pairs": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
+                }
+            }
+        },
+        {
+            "name": "font_diff",
+            "description": "List glyphs that differ between two font files, with the point or value that changed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "a": path, "b": path },
+                "required": ["a", "b"]
+            }
+        },
+        {
+            "name": "font_proof",
+            "description": "Draw the open font to a PNG, with metric guides and spacing boxes. text omitted draws the encoded character set. compare draws a second font underneath.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": path,
+                    "text": { "type": "string" },
+                    "pixel_size": { "type": "number", "default": 72 },
+                    "guides": { "type": "boolean", "default": true },
+                    "boxes": { "type": "boolean", "default": true },
+                    "compare": path,
+                    "force": { "type": "boolean", "default": false }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "glyph_move",
+            "description": "Move a glyph to a new index in the font. index is the position after the move.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": name,
+                    "index": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["name", "index"]
+            }
+        },
+        {
+            "name": "family_copy",
+            "description": "Copy a family file and its styles into another folder. family renames every style. label is stored on the new family file, so a version folder is one step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": path,
+                    "dir": path,
+                    "family": { "type": "string" },
+                    "label": { "type": "string" },
+                    "force": { "type": "boolean", "default": false }
+                },
+                "required": ["path", "dir"]
+            }
+        },
+        {
+            "name": "undo",
+            "description": "Undo the last edit on the active font.",
+            "inputSchema": none
+        },
+        {
+            "name": "redo",
+            "description": "Redo an undone edit on the active font.",
+            "inputSchema": none
+        },
+        {
+            "name": "width_scale",
+            "description": "Change a glyph's width and keep vertical stem thickness. Counters scale. Sidebearings scale. factor 1 leaves the glyph alone.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "factor": { "type": "number" },
+                    "names": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["factor"]
+            }
+        },
+        {
+            "name": "slant",
+            "description": "Slant the open font in place and shift each glyph so the ink stays centred in its advance. Sets italic and the italic angle.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "degrees": { "type": "number" } },
+                "required": ["degrees"]
+            }
+        }
+    ]) {
+        tools.extend(more);
+    }
+    Value::Array(tools)
 }
 
 #[cfg(test)]
@@ -524,7 +791,10 @@ mod tests {
             .collect();
         assert!(names.contains(&"point_move"));
         assert!(names.contains(&"points_set"));
-        assert_eq!(names.len(), 19);
+        assert!(names.contains(&"path_offset"));
+        assert!(names.contains(&"kern_add"));
+        assert!(names.contains(&"font_proof"));
+        assert_eq!(names.len(), 38);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }
@@ -571,13 +841,22 @@ mod tests {
         let point = &server.session().font().unwrap().glyphs[0].contours[0].points[1];
         assert_eq!((point.x, point.y), (140.0, -10.0));
 
+        let refused = call(&mut server, 5, "font_save", json!({}));
+        assert_eq!(refused["isError"], json!(true));
+        assert!(
+            payload(&refused)["error"]
+                .as_str()
+                .unwrap()
+                .contains("force"),
+            "{refused}"
+        );
         assert_eq!(
-            call(&mut server, 5, "font_save", json!({}))["isError"],
+            call(&mut server, 6, "font_save", json!({ "force": true }))["isError"],
             json!(false)
         );
-        let reopened = call(&mut server, 6, "font_open", json!({ "path": path }));
+        let reopened = call(&mut server, 7, "font_open", json!({ "path": path }));
         assert_eq!(reopened["isError"], json!(false));
-        let glyph = payload(&call(&mut server, 7, "glyph_get", json!({ "name": "H" })));
+        let glyph = payload(&call(&mut server, 8, "glyph_get", json!({ "name": "H" })));
         assert_eq!(glyph["data"]["contours"][0]["points"][1]["x"], json!(140.0));
 
         let _ = fs::remove_dir_all(dir);
@@ -660,7 +939,7 @@ mod tests {
         let regular_id = fonts["data"]["fonts"][0]["id"].clone();
         call(&mut server, 6, "font_select", json!({ "id": regular_id }));
         assert_eq!(
-            call(&mut server, 7, "font_save", json!({}))["isError"],
+            call(&mut server, 7, "font_save", json!({ "force": true }))["isError"],
             json!(false)
         );
         let check = payload(&call(&mut server, 8, "family_check", json!({})));

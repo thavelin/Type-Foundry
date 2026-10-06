@@ -10,6 +10,10 @@ pub struct CompatIssue {
     pub code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glyph: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contour: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point: Option<usize>,
     pub detail: String,
 }
 
@@ -19,6 +23,8 @@ pub fn blend_fonts(a: &Font, b: &Font, t: f64) -> Result<Font, Vec<CompatIssue>>
         return Err(vec![CompatIssue {
             code: "t",
             glyph: None,
+            contour: None,
+            point: None,
             detail: "blend amount must be a finite number".to_string(),
         }]);
     }
@@ -35,6 +41,8 @@ pub fn compatibility(a: &Font, b: &Font) -> Vec<CompatIssue> {
         issues.push(CompatIssue {
             code: "upm",
             glyph: None,
+            contour: None,
+            point: None,
             detail: format!("units per em differ: {} and {}", a.upm, b.upm),
         });
     }
@@ -45,6 +53,8 @@ pub fn compatibility(a: &Font, b: &Font) -> Vec<CompatIssue> {
         issues.push(CompatIssue {
             code: "missing",
             glyph: Some((*name).to_string()),
+            contour: None,
+            point: None,
             detail: format!("{name} is missing from {}", b.name),
         });
     }
@@ -52,6 +62,8 @@ pub fn compatibility(a: &Font, b: &Font) -> Vec<CompatIssue> {
         issues.push(CompatIssue {
             code: "missing",
             glyph: Some((*name).to_string()),
+            contour: None,
+            point: None,
             detail: format!("{name} is missing from {}", a.name),
         });
     }
@@ -71,6 +83,8 @@ fn glyph_issues(a: &Glyph, b: &Glyph) -> Vec<CompatIssue> {
         issues.push(CompatIssue {
             code: "unicode",
             glyph: Some(a.name.clone()),
+            contour: None,
+            point: None,
             detail: format!("unicode differs: {:?} and {:?}", a.unicode, b.unicode),
         });
     }
@@ -78,6 +92,8 @@ fn glyph_issues(a: &Glyph, b: &Glyph) -> Vec<CompatIssue> {
         issues.push(CompatIssue {
             code: "contours",
             glyph: Some(a.name.clone()),
+            contour: None,
+            point: None,
             detail: format!(
                 "contour count differs: {} and {}",
                 a.contours.len(),
@@ -91,6 +107,8 @@ fn glyph_issues(a: &Glyph, b: &Glyph) -> Vec<CompatIssue> {
             issues.push(CompatIssue {
                 code: "closed",
                 glyph: Some(a.name.clone()),
+                contour: Some(index),
+                point: None,
                 detail: format!("contour {index} closed flag differs"),
             });
         }
@@ -98,6 +116,8 @@ fn glyph_issues(a: &Glyph, b: &Glyph) -> Vec<CompatIssue> {
             issues.push(CompatIssue {
                 code: "points",
                 glyph: Some(a.name.clone()),
+                contour: Some(index),
+                point: None,
                 detail: format!(
                     "contour {index} point count differs: {} and {}",
                     left.points.len(),
@@ -113,6 +133,8 @@ fn glyph_issues(a: &Glyph, b: &Glyph) -> Vec<CompatIssue> {
                 issues.push(CompatIssue {
                     code: "kind",
                     glyph: Some(a.name.clone()),
+                    contour: Some(index),
+                    point: Some(point_index),
                     detail: format!("contour {index} point {point_index} kind differs"),
                 });
             }
@@ -120,6 +142,8 @@ fn glyph_issues(a: &Glyph, b: &Glyph) -> Vec<CompatIssue> {
                 issues.push(CompatIssue {
                     code: "smooth",
                     glyph: Some(a.name.clone()),
+                    contour: Some(index),
+                    point: Some(point_index),
                     detail: format!("contour {index} point {point_index} smooth flag differs"),
                 });
             }
@@ -161,7 +185,13 @@ fn interpolate(a: &Font, b: &Font, t: f64) -> Font {
                 .clamp(1.0, 1000.0) as u16,
             italic: a.style.italic,
             italic_angle: lerp(a.style.italic_angle, b.style.italic_angle, t),
+            width: lerp(f64::from(a.style.width), f64::from(b.style.width), t)
+                .round()
+                .clamp(1.0, 9.0) as u16,
         },
+        info: a.info.clone(),
+        kerning: a.kerning.clone(),
+        features: a.features.clone(),
         glyphs,
     }
 }

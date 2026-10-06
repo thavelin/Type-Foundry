@@ -1,7 +1,12 @@
 //! View settings. They change how the window draws, never the font, and persist between launches.
 
+use std::path::{Path, PathBuf};
+
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+
+/// How many files File > Open recent keeps.
+pub const RECENT_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,6 +26,11 @@ pub struct Settings {
     pub onion_skin: bool,
     /// User guides. They are not part of the font.
     pub show_guides: bool,
+    /// Black editor paper with white fill. Off keeps the bone paper and black fill.
+    pub dark_canvas: bool,
+    /// Fonts opened or saved, newest first. File > Open recent reads it.
+    #[serde(default)]
+    pub recent: Vec<PathBuf>,
     /// Overview and editor share the main area.
     pub split_main: bool,
     /// Fraction of the main area given to the overview when split.
@@ -54,14 +64,23 @@ impl Default for Settings {
             show_preview: true,
             onion_skin: false,
             show_guides: true,
+            dark_canvas: false,
             split_main: false,
             split_ratio: 0.42,
             review_place: ReviewPlace::Bottom,
+            recent: Vec::new(),
         }
     }
 }
 
 impl Settings {
+    /// Put `path` first. An entry already in the list moves up instead of repeating.
+    pub fn remember_recent(&mut self, path: &Path) {
+        self.recent.retain(|known| known != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(RECENT_LIMIT);
+    }
+
     /// The settings window body. Returns true when a change needs thumbnails redrawn.
     pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
         let before_cell = self.cell_size;
@@ -95,10 +114,49 @@ impl Settings {
         ui.checkbox(&mut self.show_guides, "Guides").on_hover_text(
             "Lines you draw for yourself. They show on every glyph and are not part of the font.",
         );
+        ui.horizontal(|ui| {
+            ui.label("Background");
+            ui.selectable_value(&mut self.dark_canvas, false, "White");
+            ui.selectable_value(&mut self.dark_canvas, true, "Black");
+        });
         ui.add_space(8.0);
         if ui.button("Reset to defaults").clicked() {
             *self = Self::default();
         }
         (self.cell_size - before_cell).abs() > f32::EPSILON
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_settings_stay_on_the_white_canvas() {
+        let settings: Settings = serde_json::from_str(r#"{"show_guides":true}"#).unwrap();
+        assert!(!settings.dark_canvas);
+        assert!(settings.show_guides);
+        assert!(settings.recent.is_empty());
+    }
+
+    #[test]
+    fn recent_moves_a_repeat_to_the_top_and_caps_the_list() {
+        let mut settings = Settings::default();
+        settings.remember_recent(Path::new("a.json"));
+        settings.remember_recent(Path::new("b.ufo"));
+        settings.remember_recent(Path::new("a.json"));
+        assert_eq!(
+            settings.recent,
+            vec![PathBuf::from("a.json"), PathBuf::from("b.ufo")]
+        );
+
+        for index in 0..(RECENT_LIMIT + 5) {
+            settings.remember_recent(Path::new(&format!("f{index}.ttf")));
+        }
+        assert_eq!(settings.recent.len(), RECENT_LIMIT);
+        assert_eq!(
+            settings.recent[0],
+            PathBuf::from(format!("f{}.ttf", RECENT_LIMIT + 4))
+        );
     }
 }

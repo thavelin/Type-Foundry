@@ -2,8 +2,8 @@
 //!
 //! A webfontjson file is a JSON or `callback({...})` document whose `css`
 //! field holds `@font-face` rules. Each rule embeds a font as a base64 data
-//! URI. `.ttf` and `.otf` bytes are read directly. WOFF 1 bytes are unpacked
-//! first. WOFF2 and Embedded OpenType (`.eot`) are refused. Saving back over
+//! URI. `.ttf` and `.otf` bytes are read directly. WOFF 1 and WOFF2 bytes are
+//! unpacked first. Embedded OpenType (`.eot`) is refused. Saving back over
 //! `.otf`, `.woff`, or `.woff2` is refused so a JSON write cannot replace the
 //! binary file.
 
@@ -487,14 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn refuses_embedded_woff2() {
+    fn names_a_broken_embedded_woff2() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"wOF2\0\x01\0\0rest");
         let text = format!(
             "{{\"css\":\"@font-face{{font-family:Old;src:url(data:font/woff2;base64,{encoded});}}\"}}"
         );
         let error = load_text(&text).unwrap_err();
         assert!(
-            error.to_string().contains("WOFF2 is not imported"),
+            error.to_string().contains("WOFF2 could not be unpacked"),
             "{error}"
         );
     }

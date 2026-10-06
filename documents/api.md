@@ -25,14 +25,16 @@ foundry run --file commands.jsonl
 {"op":"create","name":"Wide","upm":1000}
 ```
 
-`open` also reads a folder of SVG glyphs named with four hex digits (`0041.svg` for A) and lines them up on a baseline and x-height. `open` and `save` read and write a project JSON file or a `.ufo` directory. `save` also writes an installable `.ttf` when the path ends in `.ttf`. `open` also reads a Three.js typeface JSON file (the json-fonts shape) and a webfontjson file (`callback({"css":"@font-face{...data:...}"})`). A webfontjson file may embed a `.ttf`, `.otf`, or WOFF 1 font. Those imports become a Type Foundry font in the session. A file with several `@font-face` rules imports the regular face. WOFF2 and Embedded OpenType are refused. Saving over `.otf`, `.woff`, or `.woff2` is refused. `check` and `blend` compare or blend JSON and UFO. JSON stays the working document. A UFO import keeps the default layer, sorts glyph names, and keeps the first Unicode value. It ignores anchors, guidelines, kerning, groups, and lib data. It refuses a glyph that has components or an image, and it refuses a qcurve that is not exactly one off-curve point. One off-curve point is a quadratic. Two are a cubic. On the way out, the UFO family name is the font name. TrueType export turns cubics into quadratics, closes an open contour with a straight edge, and refuses a Unicode value outside the Basic Multilingual Plane.
+`open` also reads a folder of SVG glyphs named with four hex digits (`0041.svg` for A) and lines them up on a baseline and x-height. `open` and `save` read and write a project JSON file or a `.ufo` directory. `save` also writes an installable `.ttf` when the path ends in `.ttf`. `open` also reads a Three.js typeface JSON file (the json-fonts shape) and a webfontjson file (`callback({"css":"@font-face{...data:...}"})`). A webfontjson file may embed a `.ttf`, `.otf`, or WOFF 1 font. Those imports become a Type Foundry font in the session. A file with several `@font-face` rules imports the regular face. Embedded OpenType is refused. WOFF2 is unpacked like WOFF 1. Saving over `.otf`, `.woff`, or `.woff2` is refused. `check` and `blend` compare or blend JSON and UFO. JSON stays the working document. A UFO import keeps the default layer, sorts glyph names, and keeps the first Unicode value. It ignores anchors and guidelines. Kerning groups, kerning pairs, ligatures, and `features.fea` are kept. A save over an existing UFO updates fontinfo and the default layer and leaves lib data, images, and other layers in place. A component is flattened into its glyph on import, so the outline is kept but the reference is not. It refuses a glyph with an image, and it refuses a qcurve that is not exactly one off-curve point. One off-curve point is a quadratic. Two are a cubic. On the way out, the UFO family name is the font name. TrueType export turns cubics into quadratics, closes an open contour with a straight edge, and refuses a Unicode value outside the Basic Multilingual Plane.
 
-`open`, `check`, and `blend` also read binary fonts: `.ttf`, `.otf` (CFF or CFF2 outlines), and the first face of a `.ttc` or `.otc` collection. The import keeps glyph order, names from `post` or the CFF charset, the lowest Unicode value per glyph, advances, units per em, and the vertical metrics. Composite glyphs are decomposed. TrueType implied on-curve points become real on-curve points. A variable font gives its default instance. Kerning, features, hinting, smooth flags, and other faces in a collection are not imported. A glyph without a stored name is called `uniXXXX`, or `glyphNNNNN` when it has no Unicode. `.woff` (WOFF 1) is unpacked into an sfnt and then read the same way. `.woff2` is refused with a message that says so. Saving to `.otf`, `.ttc`, `.otc`, `.woff`, or `.woff2` is refused, so nothing writes JSON under a binary extension. TrueType export now stores glyph names (`post` format 2), so a saved `.ttf` opens with the same names. See `documents/font-formats.md`.
+`open`, `check`, and `blend` also read binary fonts: `.ttf`, `.otf` (CFF or CFF2 outlines), and the first face of a `.ttc` or `.otc` collection. The import keeps glyph order, names from `post` or the CFF charset, the lowest Unicode value per glyph, advances, units per em, and the vertical metrics. Composite glyphs are decomposed. TrueType implied on-curve points become real on-curve points. A variable font gives its default instance. Horizontal kern pairs and GSUB ligatures are imported. Hinting, smooth flags, and other faces in a collection are not imported. A glyph without a stored name is called `uniXXXX`, or `glyphNNNNN` when it has no Unicode. `.woff` (WOFF 1) and `.woff2` (WOFF2, decoded with the pure-Rust `wuff` crate) are unpacked into an sfnt and then read the same way. A damaged WOFF2 is named in the error. Saving to `.otf`, `.ttc`, `.otc`, `.woff`, or `.woff2` is refused, so nothing writes JSON under a binary extension. TrueType export now stores glyph names (`post` format 2), so a saved `.ttf` opens with the same names. See `documents/font-formats.md`.
+
+`save`, `blend`, `save_family`, `export_family`, and `new` refuse to replace an existing file unless `force` is true. With `force`, the previous file is copied beside it as `name.bak` (or `name.bak2` when that already exists) and then replaced. Saving a `.ufo` does not delete `features.fea`, lib data, images, or other layers. The drawing window saves with `force`, because Save is an explicit overwrite. A command or MCP save stays strict.
 
 ```json
 {"op":"open","path":"wide.json"}
 {"op":"save","path":"wide.ufo"}
-{"op":"save","path":"wide.ttf"}
+{"op":"save","path":"wide.ttf","force":true}
 {"op":"open","path":"C:/fonts/Crimson Pro Regular.ttf"}
 {"op":"open","path":"C:/fonts/Loma-Bold.otf"}
 ```
@@ -144,16 +146,20 @@ A session can hold many open fonts. `create`, `open`, `blend`, `derive_style`, a
 
 ### Styles
 
-Every font has a style: a family name, a style name, a weight from 1 to 1000 (400 is Regular, 700 is Bold), an italic flag, and an italic angle in degrees counter-clockwise, so a right-leaning italic is negative, such as -12. A file saved before styles existed opens as the Regular of a family named after the font.
+Every font has a style: a family name, a style name, a weight from 1 to 1000 (400 is Regular, 700 is Bold), an italic flag, an italic angle in degrees counter-clockwise, so a right-leaning italic is negative, such as -12, and an OS/2 width class from 1 (ultra-condensed) to 9 (ultra-expanded). 5 is normal. A file saved before styles existed opens as the Regular of a family named after the font. Dots in the family or style name are kept, so `v4.5` stays `v4.5` in the file name and the PostScript name.
 
 ```json
 {"op":"set_style","family":"Wide","style":"Bold","weight":700}
 {"op":"set_style","italic":true,"italic_angle":-12}
+{"op":"set_style","width":3}
 {"op":"derive_style","style":"Italic","slant":12}
 {"op":"derive_style","style":"Bold","weight":700}
+{"op":"slant","degrees":12}
 ```
 
-`set_style` can be undone. Changing the family or style name renames the font to `Family Style`. `derive_style` copies the active font as a new style of the same family and opens the copy. A nonzero `slant` leans every glyph that many degrees about the baseline, sets `italic`, and sets the italic angle to match. It is a starting point for drawing a real italic.
+`set_style` can be undone. Changing the family or style name renames the font to `Family Style`. `width` is written to UFO `openTypeOS2WidthClass` and to the TrueType OS/2 width class. `derive_style` copies the active font as a new style of the same family and opens the copy. A nonzero `slant` leans every glyph that many degrees about the baseline, then shifts it so the ink stays centred in its advance, sets `italic`, and sets the italic angle to match. `slant` does the same lean on the open font.
+
+`info` returns the style, the vertical metrics, name-table fields, coverage (`glyphs` and `encoded`), kerning counts, and the glyph names.
 
 ### Families
 
@@ -169,9 +175,56 @@ A family is every open font that shares the active font's family name. The famil
 - `family_check` reports `issues` and whether the family is `ready`. Blocking issues are styles with different family names, or two styles that would export to the same file name. Notes cover two styles with the same weight and italic, different units per em, different ascender or descender, italic with an angle of 0, glyphs missing from some styles, and glyphs whose Unicode differs between styles.
 - `save_family` writes each style as `Family-Style.json` beside the family file, then the family file itself: `format` `typefoundry.family`, `version` 1, `family`, and `styles`, a list of file names relative to the family file.
 - `open_family` opens every style the family file lists. A style may be any format `open` reads.
-- `export_family` writes each style into `dir` as `Family-Style.ttf`, `.ufo`, or `.json`. It refuses before writing anything when the check finds a blocking issue.
+- `export_family` writes each style into `dir` as `Family-Style.ttf`, `.ufo`, or `.json`. It refuses before writing anything when the check finds a blocking issue, and it refuses before writing anything when a destination already exists and `force` is not set.
+- `copy_family` copies a family file and its styles into `dir`. `family` renames every style. `label` is stored on the new family file, so making a version folder from the previous one is one command.
+- `set_sidebearing` with `family` true sets that sidebearing on every open style. Each style gets its own undo step. Left shifts the outline and keeps the advance. Right changes the advance.
+
+```json
+{"op":"set_sidebearing","name":"f","side":"right","value":32,"family":true}
+{"op":"copy_family","path":"C:/fonts/v4.5/Vostok.family.json","dir":"C:/fonts/v4.6","label":"v4.6"}
+```
 
 Exports carry the style so apps group the files as one family. In TrueType, name IDs 16 and 17 hold the family and style, and IDs 1 and 2 hold the four-style grouping older apps use: Regular, Italic, Bold, and Bold Italic share the family name, and any other weight becomes its own legacy family, such as `Wide Light`. OS/2 has the weight class and the italic, bold, and regular bits, `head` has the matching style bits, `post` has the italic angle, and `hhea` slopes the caret. UFO export writes `familyName`, `styleName`, `styleMapFamilyName`, `styleMapStyleName`, `openTypeOS2WeightClass`, and `italicAngle`. TrueType, OpenType, and UFO imports read the same fields back.
+
+## Metadata, kerning, and weight
+
+`set_info` sets the name-table fields. An omitted field stays as it is. An empty vendor id exports as four spaces. An empty unique id exports as the PostScript name plus the version, with no foundry prefix. A vendor id that is set must be four ASCII characters. Two glyphs may not share a Unicode value: the command fails and names both glyphs.
+
+```json
+{"op":"set_info","copyright":"Copyright 2026 Troy Havelin","designer":"Troy Havelin","version":"4.500","vendor":"VSTK","unique_id":"Vostok Serif v4.5"}
+```
+
+Kerning is stored on the font. `None` in the file means a UFO save leaves kerning and `features.fea` that are already on disk. An object, even an empty one, replaces them. A group name starting with `public.kern1.` is a left-side group and `public.kern2.` is a right side. A glyph may be in only one group on a side. TrueType `kern` format 0 stores pairs, so groups are expanded on export. Ligatures become a `liga` feature in the UFO and a GSUB lookup in the TTF.
+
+```json
+{"op":"set_group","name":"public.kern1.round","members":["o","c","e"]}
+{"op":"add_kern","left":"public.kern1.round","right":"T","value":-30}
+{"op":"add_ligature","glyphs":["f","i"],"name":"fi"}
+{"op":"set_features","text":"feature liga {\nsub f i by fi;\n} liga;\n"}
+```
+
+`offset` moves existing points along their normals. With `corner` `round` and `add_points` true, each sharp corner on the outside of a turn becomes an arc of four points, so the point count grows and the result no longer blends with the original. Both amounts must be non-zero for an arc, and with `keep_metrics` a corner on a metric line stays sharp. `horizontal` and `vertical` are separate, so a stem can thicken more than a hairline. The point count does not change, which keeps the result compatible for blending. `keep_metrics` defaults to true and leaves baseline, x-height, cap height, and overshoots where they are. `gap` stops growth where edges already face each other. `corner` is `angle` (the default), `miter`, or `round`. `sidebearing` true shifts the sidebearings by the horizontal amount. `names` limits the edit to those glyphs. `preview` true returns the outlines and does not change the font. `stroke` uses the same offset to build an `outline` or `inline` style. Those add contours, so they do not blend with the original master.
+
+`scale_width` changes width and keeps vertical stem thickness. Counters and sidebearings scale. `factor` must be greater than 0 and at most 4.
+
+```json
+{"op":"offset","horizontal":18,"vertical":6,"gap":8,"corner":"miter","sidebearing":true}
+{"op":"offset","names":["H"],"horizontal":12,"preview":true}
+{"op":"stroke","kind":"outline","horizontal":16,"vertical":8}
+{"op":"scale_width","factor":0.8}
+```
+
+`check_outlines` flags self-intersections, kinks, wrong contour direction, missing overshoot, and glyphs that sit off the baseline or the cap height. `check_spacing` measures sidebearings along the italic slant and flags pairs closer than `min_gap`. `diff` compares two files and names each glyph that changed. A compatibility failure names the glyph, and the contour and point when it has them.
+
+```json
+{"op":"check_outlines"}
+{"op":"check_spacing","min_gap":8,"pairs":[["f",")"],["f","T"]]}
+{"op":"diff","a":"v4.5.json","b":"v4.6.json"}
+{"op":"proof","path":"proof.png","text":"Hamburgefonts","pixel_size":72}
+{"op":"move_glyph","name":"fi","index":3}
+```
+
+`proof` draws the open font to a PNG, or to a one-page vector PDF when the path ends in `.pdf`, with metric guides and advance boxes. The PDF keeps the curves and embeds no font. `compare` is a second font file drawn underneath. An empty `text` draws the encoded character set.
 
 ## Project file
 
@@ -189,10 +242,12 @@ These commands call the same operations:
 foundry new --name "Wide" --upm 1000 --out wide.json
 foundry info wide.json
 foundry check narrow.json wide.json
-foundry blend narrow.json wide.json --t 0.5 --out mid.json
+foundry blend narrow.json wide.json --t 0.5 --out mid.json --force
+foundry proof wide.json --out proof.png --text Hamburgefonts
+foundry diff narrow.json wide.json
 ```
 
-`check` and `blend` exit 1 when the fonts are not compatible.
+`check` and `blend` exit 1 when the fonts are not compatible. `new`, `blend`, and `proof` take `--force` when the output already exists. `foundry run` writes JSON with non-ASCII characters escaped as `\u`, so PowerShell 5.1 can redirect it. A missing field is named in the error, for example a point that has no `smooth`.
 
 ## MCP server
 
@@ -206,22 +261,42 @@ Stdout carries only protocol messages, one JSON-RPC object per line. Logs go to 
 | --- | --- | --- |
 | `font_create` | `name`, `upm?` | `create` |
 | `font_open` | `path` | `open` |
-| `font_save` | `path?` | `save` |
+| `font_save` | `path?`, `force?` | `save` |
 | `font_info` | none | `info` |
 | `font_glyphs` | none | `glyphs` |
 | `glyph_get` | `name` | `glyph` |
 | `point_move` | `name`, `contour`, `point`, `x`, `y` | `move_point` |
 | `font_check` | `a`, `b` | `check` |
-| `font_blend` | `a`, `b`, `t?`, `out` | `blend` |
+| `font_blend` | `a`, `b`, `t?`, `out`, `force?` | `blend` |
 | `font_list` | none | `fonts` |
 | `font_select` | `id` | `select_font` |
 | `font_close` | `id?` | `close_font` |
-| `style_set` | `family?`, `style?`, `weight?`, `italic?`, `italic_angle?` | `set_style` |
+| `style_set` | `family?`, `style?`, `weight?`, `italic?`, `italic_angle?`, `width?` | `set_style` |
 | `style_derive` | `style`, `weight?`, `italic?`, `slant?` | `derive_style` |
+| `points_set` | `name`, `points` | `set_points` |
 | `family_check` | none | `family_check` |
 | `family_open` | `path` | `open_family` |
-| `family_save` | `path` | `save_family` |
-| `family_export` | `dir`, `format` | `export_family` |
+| `family_save` | `path`, `force?` | `save_family` |
+| `family_export` | `dir`, `format`, `force?` | `export_family` |
+| `info_set` | name-table fields | `set_info` |
+| `kern_set` | `kerning` | `set_kerning` |
+| `kern_add` | `left`, `right`, `value` | `add_kern` |
+| `group_set` | `name`, `members` | `set_group` |
+| `ligature_add` | `glyphs`, `name` | `add_ligature` |
+| `features_set` | `text?` | `set_features` |
+| `path_offset` | `horizontal?`, `vertical?`, `gap?`, `corner?`, `sidebearing?`, `keep_metrics?`, `add_points?`, `names?`, `preview?` | `offset` |
+| `path_stroke` | `kind`, plus the offset fields | `stroke` |
+| `sidebearing_set` | `name`, `side`, `value`, `family?` | `set_sidebearing` |
+| `outline_check` | none | `check_outlines` |
+| `spacing_check` | `min_gap?`, `pairs?` | `check_spacing` |
+| `font_diff` | `a`, `b` | `diff` |
+| `font_proof` | `path`, `text?`, `pixel_size?`, `guides?`, `boxes?`, `compare?`, `force?` | `proof` |
+| `glyph_move` | `name`, `index` | `move_glyph` |
+| `family_copy` | `path`, `dir`, `family?`, `label?`, `force?` | `copy_family` |
+| `undo` | none | `undo` |
+| `redo` | none | `redo` |
+| `width_scale` | `factor`, `names?` | `scale_width` |
+| `slant` | `degrees` | `slant` |
 
 A tool result is `{"content":[{"type":"text","text":"..."}],"isError":false}`. The text is the command response JSON. `isError` is true when the command response has `ok: false`, or when the arguments do not fit the tool.
 

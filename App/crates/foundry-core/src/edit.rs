@@ -31,6 +31,14 @@ pub struct MetricsUpdate {
     pub x_height: Option<f64>,
 }
 
+/// Which sidebearing [`Font::set_sidebearing`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Left,
+    Right,
+}
+
 impl Font {
     fn glyph_or_err(&mut self, name: &str) -> Result<&mut Glyph, FoundryError> {
         self.glyph_mut(name)
@@ -325,8 +333,97 @@ impl Font {
                 "{code} is not a Unicode scalar value"
             )));
         }
+        if let Some(code) = unicode {
+            self.reject_duplicate_unicode(code, name)?;
+        }
         self.glyph_or_err(name)?.unicode = unicode;
         Ok(())
+    }
+
+    /// Move a glyph to `index` in the font's glyph list. `index` is the position after the move.
+    pub fn move_glyph(&mut self, name: &str, index: usize) -> Result<(), FoundryError> {
+        let from = self
+            .glyphs
+            .iter()
+            .position(|glyph| glyph.name == name)
+            .ok_or_else(|| FoundryError::MissingGlyph(name.to_string()))?;
+        if index > self.glyphs.len() {
+            return Err(FoundryError::Edit(format!(
+                "glyph index {index} is past the end of the font"
+            )));
+        }
+        let glyph = self.glyphs.remove(from);
+        let dest = index.min(self.glyphs.len());
+        self.glyphs.insert(dest, glyph);
+        Ok(())
+    }
+
+    /// Set one sidebearing. Left shifts the outline and keeps the advance. Right changes the
+    /// advance and leaves the outline. An empty glyph can take a right sidebearing, which sets
+    /// the advance, and cannot take a left one.
+    pub fn set_sidebearing(
+        &mut self,
+        name: &str,
+        side: Side,
+        value: f64,
+    ) -> Result<(), FoundryError> {
+        if !value.is_finite() {
+            return Err(FoundryError::NonFinite);
+        }
+        let glyph = self
+            .glyph_mut(name)
+            .ok_or_else(|| FoundryError::MissingGlyph(name.to_string()))?;
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        for contour in &glyph.contours {
+            for point in &contour.points {
+                min_x = min_x.min(point.x);
+                max_x = max_x.max(point.x);
+            }
+        }
+        match side {
+            Side::Right => {
+                let edge = if max_x.is_finite() { max_x } else { 0.0 };
+                glyph.advance = edge + value;
+            }
+            Side::Left => {
+                if !min_x.is_finite() {
+                    return Err(FoundryError::Edit(format!(
+                        "{name} has no outline, so it has no left sidebearing"
+                    )));
+                }
+                let dx = value - min_x;
+                for contour in &mut glyph.contours {
+                    for point in &mut contour.points {
+                        point.x += dx;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Scale a glyph's width and keep vertical stem thickness. Sidebearings scale with `factor`.
+    /// `factor` of 1 leaves the glyph alone. Counters between stems shrink. A single stem, such
+    /// as a rectangle, keeps its width.
+    pub fn scale_width(
+        &mut self,
+        factor: f64,
+        names: Option<&[String]>,
+    ) -> Result<Vec<String>, FoundryError> {
+        if !factor.is_finite() || factor <= 0.0 || factor > 4.0 {
+            return Err(FoundryError::Edit(
+                "width factor must be greater than 0 and at most 4".into(),
+            ));
+        }
+        let targets = self.resolve_names(names)?;
+        for name in &targets {
+            let glyph = self
+                .glyph_mut(name)
+                .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?;
+            scale_glyph_width(glyph, factor);
+        }
+        Ok(targets)
     }
 
     pub fn rename(&mut self, name: &str) -> Result<(), FoundryError> {
@@ -462,6 +559,118 @@ impl Font {
             }
         }
     }
+}
+
+fn scale_glyph_width(glyph: &mut Glyph, factor: f64) {
+    let (min_x, max_x) = ink_x(glyph);
+    if !min_x.is_finite() {
+        glyph.advance *= factor;
+        return;
+    }
+    let edges = vertical_edges(glyph);
+    let placed = place_edges(&edges, factor);
+    for contour in &mut glyph.contours {
+        for point in &mut contour.points {
+            point.x = remap_x(point.x, &edges, &placed);
+        }
+    }
+    let (new_min, new_max) = ink_x(glyph);
+    let new_lsb = min_x * factor;
+    let shift = new_lsb - new_min;
+    for contour in &mut glyph.contours {
+        for point in &mut contour.points {
+            point.x += shift;
+        }
+    }
+    let new_rsb = (glyph.advance - max_x) * factor;
+    glyph.advance = new_lsb + (new_max - new_min) + new_rsb;
+}
+
+fn ink_x(glyph: &Glyph) -> (f64, f64) {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    for contour in &glyph.contours {
+        for point in &contour.points {
+            min_x = min_x.min(point.x);
+            max_x = max_x.max(point.x);
+        }
+    }
+    (min_x, max_x)
+}
+
+fn vertical_edges(glyph: &Glyph) -> Vec<f64> {
+    let mut xs = Vec::new();
+    for contour in &glyph.contours {
+        let count = contour.points.len();
+        if count < 2 {
+            continue;
+        }
+        let segments = if contour.closed { count } else { count - 1 };
+        for index in 0..segments {
+            let start = &contour.points[index];
+            let end = &contour.points[(index + 1) % count];
+            let dx = (end.x - start.x).abs();
+            let dy = (end.y - start.y).abs();
+            if dy >= 8.0 && dy > dx * 4.0 {
+                xs.push((start.x + end.x) / 2.0);
+            }
+        }
+    }
+    xs.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut clustered: Vec<f64> = Vec::new();
+    for x in xs {
+        if let Some(last) = clustered.last_mut()
+            && (x - *last).abs() <= 2.0
+        {
+            *last = (*last + x) / 2.0;
+            continue;
+        }
+        clustered.push(x);
+    }
+    clustered
+}
+
+/// Even gaps, starting at the outside, are stems and keep their width. Odd gaps are counters
+/// and scale. One edge, or none, leaves the ink where it is.
+fn place_edges(edges: &[f64], factor: f64) -> Vec<f64> {
+    if edges.len() < 2 {
+        return edges.to_vec();
+    }
+    let mut placed = vec![edges[0]];
+    for index in 0..edges.len() - 1 {
+        let gap = edges[index + 1] - edges[index];
+        let scaled = if index % 2 == 0 { gap } else { gap * factor };
+        let next = placed[index] + scaled;
+        placed.push(next);
+    }
+    placed
+}
+
+fn remap_x(x: f64, edges: &[f64], placed: &[f64]) -> f64 {
+    if edges.len() < 2 || edges.len() != placed.len() {
+        return x;
+    }
+    let first = edges[0];
+    let last = *edges.last().unwrap();
+    let new_first = placed[0];
+    let new_last = *placed.last().unwrap();
+    if x <= first {
+        return new_first + (x - first);
+    }
+    if x >= last {
+        return new_last + (x - last);
+    }
+    for index in 0..edges.len() - 1 {
+        if x <= edges[index + 1] {
+            let span = edges[index + 1] - edges[index];
+            if span.abs() < 1e-9 {
+                return placed[index];
+            }
+            let t = (x - edges[index]) / span;
+            return placed[index] + t * (placed[index + 1] - placed[index]);
+        }
+    }
+    x
 }
 
 fn finite(values: &[f64]) -> Result<(), FoundryError> {
@@ -822,5 +1031,70 @@ mod tests {
             font.transform(Some(&["zz".to_string()]), None, [1.0; 6], false)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn scale_width_keeps_a_stem_and_scales_the_sidebearings() {
+        let mut font = Font::new("Width", 1000).unwrap();
+        font.insert_glyph(Glyph {
+            name: "H".into(),
+            unicode: Some(72),
+            advance: 400.0,
+            contours: vec![Contour {
+                closed: true,
+                points: vec![
+                    on(100.0, 0.0),
+                    on(200.0, 0.0),
+                    on(200.0, 100.0),
+                    on(100.0, 100.0),
+                ],
+            }],
+        })
+        .unwrap();
+        font.scale_width(0.5, None).unwrap();
+        let glyph = font.glyph("H").unwrap();
+        let xs: Vec<f64> = glyph.contours[0]
+            .points
+            .iter()
+            .map(|point| point.x)
+            .collect();
+        assert!(xs.iter().any(|x| (*x - 50.0).abs() < 1e-6), "{xs:?}");
+        assert!(xs.iter().any(|x| (*x - 150.0).abs() < 1e-6), "{xs:?}");
+        assert!((glyph.advance - 250.0).abs() < 1e-6, "{}", glyph.advance);
+        let ys: Vec<f64> = glyph.contours[0]
+            .points
+            .iter()
+            .map(|point| point.y)
+            .collect();
+        assert!(ys.contains(&0.0) && ys.contains(&100.0));
+    }
+
+    #[test]
+    fn move_glyph_inserts_at_the_requested_index() {
+        let mut font = font_with(vec![square()]);
+        font.insert_glyph(Glyph {
+            name: "b".into(),
+            unicode: None,
+            advance: 100.0,
+            contours: vec![],
+        })
+        .unwrap();
+        font.move_glyph("b", 0).unwrap();
+        assert_eq!(font.glyph_names(), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn duplicate_unicode_is_refused() {
+        let mut font = font_with(vec![square()]);
+        font.insert_glyph(Glyph {
+            name: "b".into(),
+            unicode: None,
+            advance: 100.0,
+            contours: vec![],
+        })
+        .unwrap();
+        let err = font.set_unicode("b", Some(97)).unwrap_err();
+        assert!(err.to_string().contains("U+0061"), "{err}");
+        assert!(err.to_string().contains("a"), "{err}");
     }
 }

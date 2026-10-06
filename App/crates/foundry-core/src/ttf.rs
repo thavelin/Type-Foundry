@@ -15,9 +15,6 @@ use crate::font::{Contour, Font, Glyph, Point, PointKind};
 const MAC_EPOCH_OFFSET: u64 = 2_082_844_800;
 const QUAD_ERROR: f64 = 1.0;
 const MAX_SPLIT: u32 = 8;
-/// `head.fontRevision`, 16.16 fixed. Name ID 5 repeats it as `Version 1.000`.
-const FONT_REVISION: u32 = 0x0001_0000;
-const VERSION_STRING: &str = "Version 1.000";
 
 pub(crate) fn is_ttf_path(path: &Path) -> bool {
     path.extension()
@@ -68,6 +65,16 @@ pub(crate) fn write_ttf(font: &Font) -> Result<Vec<u8>, FoundryError> {
     tables.insert(*b"name", name_table(font));
     tables.insert(*b"OS/2", os2_table(font, &glyphs, &codes, bounds));
     tables.insert(*b"post", post_table(&glyphs, font.style.italic_angle));
+    let pairs = crate::kerning::resolved_pairs(font)?;
+    if let Some(kern) = kern_table(&glyphs, &pairs)? {
+        tables.insert(*b"kern", kern);
+    }
+    if let Some(kerning) = &font.kerning
+        && !kerning.ligatures.is_empty()
+        && let Some(gsub) = gsub_table(&glyphs, &kerning.ligatures)?
+    {
+        tables.insert(*b"GSUB", gsub);
+    }
 
     assemble(tables)
 }
@@ -433,8 +440,15 @@ fn cmap_pairs(glyphs: &[BuiltGlyph]) -> Result<Vec<(u32, u16)>, FoundryError> {
                 glyph.name
             )));
         }
-        if pairs.iter().any(|(existing, _)| *existing == code) {
-            continue;
+        if let Some(other) = glyphs
+            .iter()
+            .find(|other| other.unicode == Some(code) && other.name != glyph.name)
+        {
+            return Err(FoundryError::DuplicateUnicode {
+                code,
+                glyph: glyph.name.clone(),
+                other: other.name.clone(),
+            });
         }
         pairs.push((code, u16::try_from(index).unwrap_or(0)));
     }
@@ -487,7 +501,7 @@ fn head_table(font: &Font, bounds: Bounds, now: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_u16(&mut bytes, 1);
     push_u16(&mut bytes, 0);
-    push_u32(&mut bytes, FONT_REVISION);
+    push_u32(&mut bytes, font.info.font_revision());
     push_u32(&mut bytes, 0);
     push_u32(&mut bytes, 0x5F0F_3CF5);
     push_u16(&mut bytes, 0x000B);
@@ -601,31 +615,42 @@ fn maxp_table(glyphs: &[BuiltGlyph]) -> Vec<u8> {
 /// does not have one, even when every outline is valid. ID 5 is the version string.
 fn name_table(font: &Font) -> Vec<u8> {
     let (legacy_family, legacy_style) = font.legacy_names();
-    let family = utf16_be(&legacy_family);
-    let style = utf16_be(&legacy_style);
-    let unique = utf16_be(&format!("Havelin: {}", font.full_name()));
-    let full = utf16_be(&font.full_name());
-    let version = utf16_be(VERSION_STRING);
-    let postscript = utf16_be(&postscript_name(&font.file_stem()));
-    let typographic_family = utf16_be(&font.style.family);
-    let typographic_style = utf16_be(&font.style.name);
-    let strings = [
-        &family,
-        &style,
-        &unique,
-        &full,
-        &version,
-        &postscript,
-        &typographic_family,
-        &typographic_style,
+    let postscript = postscript_name(&font.file_stem());
+    let mut records = vec![
+        (1u16, legacy_family),
+        (2, legacy_style),
+        (3, font.info.export_unique_id(&postscript)),
+        (4, font.full_name()),
+        (5, font.info.version_label()),
+        (6, postscript),
+        (16, font.style.family.clone()),
+        (17, font.style.name.clone()),
     ];
-    let ids = [1u16, 2, 3, 4, 5, 6, 16, 17];
+    let optional = [
+        (0u16, &font.info.copyright),
+        (9, &font.info.designer),
+        (13, &font.info.license),
+        (14, &font.info.license_url),
+    ];
+    for (id, text) in optional {
+        if !text.trim().is_empty() {
+            records.push((id, text.trim().to_string()));
+        }
+    }
+    records.sort_by_key(|(id, _)| *id);
+    let encoded: Vec<(u16, Vec<u8>)> = records
+        .iter()
+        .map(|(id, text)| (*id, utf16_be(text)))
+        .collect();
     let mut bytes = Vec::new();
     push_u16(&mut bytes, 0);
-    push_u16(&mut bytes, u16::try_from(ids.len()).unwrap_or(0));
-    push_u16(&mut bytes, u16::try_from(6 + ids.len() * 12).unwrap_or(0));
+    push_u16(&mut bytes, u16::try_from(encoded.len()).unwrap_or(0));
+    push_u16(
+        &mut bytes,
+        u16::try_from(6 + encoded.len() * 12).unwrap_or(0),
+    );
     let mut storage = Vec::new();
-    for (id, string) in ids.iter().zip(strings) {
+    for (id, string) in &encoded {
         push_u16(&mut bytes, 3);
         push_u16(&mut bytes, 1);
         push_u16(&mut bytes, 0x0409);
@@ -667,7 +692,7 @@ fn os2_table(font: &Font, glyphs: &[BuiltGlyph], codes: &[(u32, u16)], bounds: B
     write_u16(&mut bytes, 0, 4);
     write_i16(&mut bytes, 2, i16::try_from(average).unwrap_or(0));
     write_u16(&mut bytes, 4, font.style.weight);
-    write_u16(&mut bytes, 6, 5);
+    write_u16(&mut bytes, 6, font.style.width);
     write_i16(&mut bytes, 10, fit_metric(650.0 * scale));
     write_i16(&mut bytes, 12, fit_metric(700.0 * scale));
     write_i16(&mut bytes, 16, fit_metric(140.0 * scale));
@@ -676,7 +701,7 @@ fn os2_table(font: &Font, glyphs: &[BuiltGlyph], codes: &[(u32, u16)], bounds: B
     write_i16(&mut bytes, 24, fit_metric(480.0 * scale));
     write_i16(&mut bytes, 26, fit_metric(50.0 * scale));
     write_i16(&mut bytes, 28, fit_metric(300.0 * scale));
-    bytes[58..62].copy_from_slice(b"HAVL");
+    bytes[58..62].copy_from_slice(&font.info.vendor_tag());
     // fsSelection: italic is bit 0, bold bit 5, regular bit 6. Bit 7 says to use typo metrics.
     let (bold, italic) = style_bits(font);
     let regular = !bold && !italic;
@@ -842,10 +867,10 @@ fn style_bits(font: &Font) -> (bool, bool) {
 }
 
 fn postscript_name(name: &str) -> String {
-    let cleaned: String = name
+    let mut cleaned: String = name
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' {
                 ch
             } else {
                 '-'
@@ -853,12 +878,201 @@ fn postscript_name(name: &str) -> String {
         })
         .take(63)
         .collect();
-    let trimmed = cleaned.trim_matches('-');
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", ".");
+    }
+    let trimmed = cleaned.trim_matches(|ch| ch == '-' || ch == '.');
     if trimmed.is_empty() {
         "Font".to_string()
     } else {
         trimmed.to_string()
     }
+}
+
+fn glyph_index(glyphs: &[BuiltGlyph], name: &str) -> Result<u16, FoundryError> {
+    glyphs
+        .iter()
+        .position(|glyph| glyph.name == name)
+        .and_then(|index| u16::try_from(index).ok())
+        .ok_or_else(|| {
+            FoundryError::Ttf(format!(
+                "{name} is not in the font, so it cannot be kerned or ligated"
+            ))
+        })
+}
+
+fn fit_kern(value: f64) -> Result<i16, FoundryError> {
+    if !value.is_finite() {
+        return Err(FoundryError::NonFinite);
+    }
+    let rounded = value.round();
+    if !(f64::from(i16::MIN)..=f64::from(i16::MAX)).contains(&rounded) {
+        return Err(FoundryError::Ttf(format!(
+            "kerning value {value} does not fit in a TrueType kern table"
+        )));
+    }
+    Ok(rounded as i16)
+}
+
+/// OpenType `kern` format 0. `None` when there is nothing to write.
+fn kern_table(
+    glyphs: &[BuiltGlyph],
+    pairs: &[(String, String, f64)],
+) -> Result<Option<Vec<u8>>, FoundryError> {
+    let mut encoded = Vec::new();
+    for (left, right, value) in pairs {
+        let left_id = glyph_index(glyphs, left)?;
+        let right_id = glyph_index(glyphs, right)?;
+        let packed = (u32::from(left_id) << 16) | u32::from(right_id);
+        encoded.push((packed, fit_kern(*value)?));
+    }
+    encoded.sort_by_key(|(packed, _)| *packed);
+    encoded.dedup_by_key(|(packed, _)| *packed);
+    if encoded.is_empty() {
+        return Ok(None);
+    }
+    let count = u16::try_from(encoded.len()).map_err(|_| {
+        FoundryError::Ttf("too many kerning pairs for a TrueType kern table".into())
+    })?;
+    let (pow, log, _) = power_of_two(count);
+    let search_range = pow.saturating_mul(6);
+    let range_shift = count.saturating_mul(6).saturating_sub(search_range);
+    let length = 14u16.saturating_add(count.saturating_mul(6));
+    let mut bytes = Vec::new();
+    push_u16(&mut bytes, 0);
+    push_u16(&mut bytes, 1);
+    push_u16(&mut bytes, 0);
+    push_u16(&mut bytes, length);
+    bytes.push(0);
+    bytes.push(1);
+    push_u16(&mut bytes, count);
+    push_u16(&mut bytes, search_range);
+    push_u16(&mut bytes, log);
+    push_u16(&mut bytes, range_shift);
+    for (packed, value) in encoded {
+        push_u16(&mut bytes, (packed >> 16) as u16);
+        push_u16(&mut bytes, packed as u16);
+        push_i16(&mut bytes, value);
+    }
+    Ok(Some(bytes))
+}
+
+/// A minimal GSUB with one `liga` lookup. `None` when no ligature can be written.
+fn gsub_table(
+    glyphs: &[BuiltGlyph],
+    ligatures: &[crate::font::Ligature],
+) -> Result<Option<Vec<u8>>, FoundryError> {
+    use std::collections::BTreeMap;
+    /// Components after the first glyph, then the ligature glyph id.
+    type LigaSet = Vec<(Vec<u16>, u16)>;
+    let mut grouped: BTreeMap<u16, LigaSet> = BTreeMap::new();
+    for liga in ligatures {
+        if liga.glyphs.len() < 2 {
+            continue;
+        }
+        let first = glyph_index(glyphs, &liga.glyphs[0])?;
+        let mut rest = Vec::new();
+        for name in liga.glyphs.iter().skip(1) {
+            rest.push(glyph_index(glyphs, name)?);
+        }
+        let target = glyph_index(glyphs, &liga.name)?;
+        grouped.entry(first).or_default().push((rest, target));
+    }
+    if grouped.is_empty() {
+        return Ok(None);
+    }
+    let entries: Vec<(u16, LigaSet)> = grouped.into_iter().collect();
+    let coverage_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+
+    let mut coverage = Vec::new();
+    push_u16(&mut coverage, 1);
+    push_u16(&mut coverage, coverage_count);
+    for (gid, _) in &entries {
+        push_u16(&mut coverage, *gid);
+    }
+
+    let mut sets = Vec::new();
+    for (_, ligs) in &entries {
+        let mut blobs = Vec::new();
+        for (comps, lig_id) in ligs {
+            let mut lig = Vec::new();
+            push_u16(&mut lig, *lig_id);
+            let count = u16::try_from(comps.len() + 1).unwrap_or(u16::MAX);
+            push_u16(&mut lig, count);
+            for component in comps {
+                push_u16(&mut lig, *component);
+            }
+            blobs.push(lig);
+        }
+        let mut body = Vec::new();
+        let header = 2 + 2 * blobs.len();
+        push_u16(&mut body, u16::try_from(blobs.len()).unwrap_or(0));
+        let mut cursor = header;
+        for blob in &blobs {
+            push_u16(&mut body, u16::try_from(cursor).unwrap_or(0));
+            cursor += blob.len();
+        }
+        for blob in blobs {
+            body.extend(blob);
+        }
+        sets.push(body);
+    }
+
+    let header_len = 6 + 2 * sets.len();
+    let mut sub = Vec::new();
+    push_u16(&mut sub, 1);
+    push_u16(&mut sub, u16::try_from(header_len).unwrap_or(0));
+    push_u16(&mut sub, coverage_count);
+    let mut cursor = header_len + coverage.len();
+    let mut offsets = Vec::new();
+    for set in &sets {
+        offsets.push(cursor);
+        cursor += set.len();
+    }
+    for offset in offsets {
+        push_u16(&mut sub, u16::try_from(offset).unwrap_or(0));
+    }
+    sub.extend(coverage);
+    for set in sets {
+        sub.extend(set);
+    }
+
+    let script_list_len = 20u16;
+    let feature_list_len = 14u16;
+    let gsub_header = 10u16;
+    let script_off = gsub_header;
+    let feature_off = script_off + script_list_len;
+    let lookup_off = feature_off + feature_list_len;
+
+    let mut out = Vec::new();
+    push_u16(&mut out, 1);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, script_off);
+    push_u16(&mut out, feature_off);
+    push_u16(&mut out, lookup_off);
+    push_u16(&mut out, 1);
+    out.extend(b"DFLT");
+    push_u16(&mut out, 8);
+    push_u16(&mut out, 4);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0xFFFF);
+    push_u16(&mut out, 1);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 1);
+    out.extend(b"liga");
+    push_u16(&mut out, 8);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 1);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 1);
+    push_u16(&mut out, 4);
+    push_u16(&mut out, 4);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 1);
+    push_u16(&mut out, 8);
+    out.extend(sub);
+    Ok(Some(out))
 }
 
 fn utf16_be(text: &str) -> Vec<u8> {
@@ -1082,6 +1296,8 @@ mod tests {
         let mut saw_version = false;
         for name in face.names() {
             if name.name_id == ttf_parser::name_id::UNIQUE_ID {
+                let text = name.to_string().unwrap();
+                assert!(!text.contains("Havelin"), "{text}");
                 saw_unique = true;
             }
             if name.name_id == ttf_parser::name_id::VERSION {
@@ -1117,6 +1333,60 @@ mod tests {
                 ink.points
             );
         }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn width_vendor_and_version_dots_are_written() {
+        let dir = temp_dir();
+        let path = dir.join("vostok.ttf");
+        let mut font = Font::new("Vostok", 1000).unwrap();
+        font.style.family = "VostokSerifv4.5".into();
+        font.style.name = "Compressed".into();
+        font.style.width = 2;
+        font.info.vendor = "VSTK".into();
+        font.info.unique_id = "vostok-4.5".into();
+        font.insert_glyph(Glyph {
+            name: "H".into(),
+            unicode: Some(u32::from('H')),
+            advance: 400.0,
+            contours: vec![Contour {
+                closed: true,
+                points: vec![
+                    on(40.0, 0.0),
+                    on(120.0, 0.0),
+                    on(120.0, 120.0),
+                    on(40.0, 120.0),
+                ],
+            }],
+        })
+        .unwrap();
+        font.save(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let face = Face::parse(&bytes, 0).unwrap();
+        assert_eq!(face.width().to_number(), 2);
+        let os2 = face
+            .raw_face()
+            .table(ttf_parser::Tag::from_bytes(b"OS/2"))
+            .unwrap();
+        assert_eq!(&os2[58..62], b"VSTK");
+        let mut saw_postscript = false;
+        let mut saw_unique = false;
+        for name in face.names() {
+            let Some(text) = name.to_string() else {
+                continue;
+            };
+            if name.name_id == ttf_parser::name_id::POST_SCRIPT_NAME {
+                assert!(text.contains("v4.5"), "{text}");
+                saw_postscript = true;
+            }
+            if name.name_id == ttf_parser::name_id::UNIQUE_ID {
+                assert_eq!(text, "vostok-4.5");
+                saw_unique = true;
+            }
+        }
+        assert!(saw_postscript);
+        assert!(saw_unique);
         let _ = fs::remove_dir_all(dir);
     }
 

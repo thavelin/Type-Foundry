@@ -3,8 +3,10 @@
 use std::path::Path;
 
 use foundry_core::{
-    Anchor, Contour, ExportFormat, Font, FoundryError, Glyph, Matrix, MetricsUpdate, PointKind,
-    StyleUpdate, blend_fonts, check_family, compatibility, export_family, load_family, save_family,
+    Anchor, Contour, Corner, ExportFormat, Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix,
+    MetricsUpdate, OffsetOptions, PointKind, ProofOptions, Side, StrokeKind, StyleUpdate,
+    blend_fonts, check_family, check_outlines, check_spacing, compatibility, copy_family,
+    diff_fonts, export_family, load_family, offset_font, save_family, stroke_font, write_proof,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,6 +24,9 @@ pub enum Command {
     },
     Save {
         path: String,
+        /// Replace an existing file. A copy is kept beside it, with `.bak` added to the name.
+        #[serde(default)]
+        force: bool,
     },
     Info,
     Glyphs,
@@ -162,6 +167,9 @@ pub enum Command {
         italic: Option<bool>,
         #[serde(default)]
         italic_angle: Option<f64>,
+        /// OS/2 width class, 1 (ultra-condensed) through 9 (ultra-expanded). 5 is normal.
+        #[serde(default)]
+        width: Option<u16>,
     },
     DeriveStyle {
         style: String,
@@ -179,12 +187,16 @@ pub enum Command {
         path: String,
         #[serde(default)]
         ids: Option<Vec<u32>>,
+        #[serde(default)]
+        force: bool,
     },
     ExportFamily {
         dir: String,
         format: ExportFormat,
         #[serde(default)]
         ids: Option<Vec<u32>>,
+        #[serde(default)]
+        force: bool,
     },
     FamilyCheck {
         #[serde(default)]
@@ -204,6 +216,147 @@ pub enum Command {
         #[serde(default = "default_t")]
         t: f64,
         out: String,
+        #[serde(default)]
+        force: bool,
+    },
+    SetInfo {
+        #[serde(default)]
+        copyright: Option<String>,
+        #[serde(default)]
+        designer: Option<String>,
+        #[serde(default)]
+        license: Option<String>,
+        #[serde(default)]
+        license_url: Option<String>,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        vendor: Option<String>,
+        #[serde(default)]
+        unique_id: Option<String>,
+    },
+    SetKerning {
+        kerning: Kerning,
+    },
+    AddKern {
+        left: String,
+        right: String,
+        value: f64,
+    },
+    SetGroup {
+        name: String,
+        members: Vec<String>,
+    },
+    AddLigature {
+        glyphs: Vec<String>,
+        name: String,
+    },
+    /// `text` omitted keeps a UFO's `features.fea`. An empty string replaces it.
+    SetFeatures {
+        #[serde(default)]
+        text: Option<String>,
+    },
+    Offset {
+        #[serde(default)]
+        horizontal: f64,
+        #[serde(default)]
+        vertical: f64,
+        #[serde(default)]
+        gap: f64,
+        #[serde(default)]
+        corner: Corner,
+        #[serde(default)]
+        sidebearing: bool,
+        #[serde(default = "default_true")]
+        keep_metrics: bool,
+        /// Insert arc points at round joins. Needs `corner: round`.
+        #[serde(default)]
+        add_points: bool,
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        /// Return the moved outlines and leave the open font alone.
+        #[serde(default)]
+        preview: bool,
+    },
+    Stroke {
+        kind: StrokeKind,
+        #[serde(default)]
+        horizontal: f64,
+        #[serde(default)]
+        vertical: f64,
+        #[serde(default)]
+        gap: f64,
+        #[serde(default)]
+        corner: Corner,
+        #[serde(default)]
+        sidebearing: bool,
+        #[serde(default = "default_true")]
+        keep_metrics: bool,
+        /// Insert arc points at round joins. Needs `corner: round`.
+        #[serde(default)]
+        add_points: bool,
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(default)]
+        preview: bool,
+    },
+    SetSidebearing {
+        name: String,
+        side: Side,
+        value: f64,
+        /// Apply the same sidebearing to every open style in the family.
+        #[serde(default)]
+        family: bool,
+        #[serde(default)]
+        ids: Option<Vec<u32>>,
+    },
+    CheckOutlines,
+    CheckSpacing {
+        #[serde(default)]
+        min_gap: f64,
+        #[serde(default)]
+        pairs: Option<Vec<(String, String)>>,
+    },
+    Diff {
+        a: String,
+        b: String,
+    },
+    Proof {
+        path: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default = "default_pixel")]
+        pixel_size: f64,
+        #[serde(default = "default_true")]
+        guides: bool,
+        #[serde(default = "default_true")]
+        boxes: bool,
+        #[serde(default)]
+        compare: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
+    MoveGlyph {
+        name: String,
+        index: usize,
+    },
+    CopyFamily {
+        path: String,
+        dir: String,
+        #[serde(default)]
+        family: Option<String>,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
+    Slant {
+        degrees: f64,
+    },
+    ScaleWidth {
+        factor: f64,
+        #[serde(default)]
+        names: Option<Vec<String>>,
     },
 }
 
@@ -217,6 +370,14 @@ fn default_t() -> f64 {
 
 fn default_kind() -> PointKind {
     PointKind::On
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_pixel() -> f64 {
+    72.0
 }
 
 /// One point set to an absolute position by `set_points`.
@@ -233,30 +394,47 @@ pub const UNDO_LIMIT: usize = 200;
 
 impl Command {
     /// True for commands that change the open font in place and can be undone.
+    /// A family sidebearing and an offset preview change nothing on the active font by themselves:
+    /// the family edit records one step on each style, and a preview only returns outlines.
     fn is_edit(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            Self::SetSidebearing { family: true, .. }
+            | Self::Offset { preview: true, .. }
+            | Self::Stroke { preview: true, .. } => false,
             Self::PutGlyph { .. }
-                | Self::SetAdvance { .. }
-                | Self::MovePoint { .. }
-                | Self::MovePoints { .. }
-                | Self::SetPoints { .. }
-                | Self::InsertPoint { .. }
-                | Self::SplitSegment { .. }
-                | Self::DeletePoints { .. }
-                | Self::SetPoint { .. }
-                | Self::AddContour { .. }
-                | Self::SetClosed { .. }
-                | Self::ReverseContour { .. }
-                | Self::DeleteGlyph { .. }
-                | Self::RenameGlyph { .. }
-                | Self::SetUnicode { .. }
-                | Self::RenameFont { .. }
-                | Self::SetMetrics { .. }
-                | Self::Transform { .. }
-                | Self::RoundCoordinates { .. }
-                | Self::SetStyle { .. }
-        )
+            | Self::SetAdvance { .. }
+            | Self::MovePoint { .. }
+            | Self::MovePoints { .. }
+            | Self::SetPoints { .. }
+            | Self::InsertPoint { .. }
+            | Self::SplitSegment { .. }
+            | Self::DeletePoints { .. }
+            | Self::SetPoint { .. }
+            | Self::AddContour { .. }
+            | Self::SetClosed { .. }
+            | Self::ReverseContour { .. }
+            | Self::DeleteGlyph { .. }
+            | Self::RenameGlyph { .. }
+            | Self::SetUnicode { .. }
+            | Self::RenameFont { .. }
+            | Self::SetMetrics { .. }
+            | Self::Transform { .. }
+            | Self::RoundCoordinates { .. }
+            | Self::SetStyle { .. }
+            | Self::SetInfo { .. }
+            | Self::SetKerning { .. }
+            | Self::AddKern { .. }
+            | Self::SetGroup { .. }
+            | Self::AddLigature { .. }
+            | Self::SetFeatures { .. }
+            | Self::Offset { .. }
+            | Self::Stroke { .. }
+            | Self::SetSidebearing { .. }
+            | Self::MoveGlyph { .. }
+            | Self::Slant { .. }
+            | Self::ScaleWidth { .. } => true,
+            _ => false,
+        }
     }
 
     /// Consecutive edits with the same key share one undo step, so a drag or a slider is one
@@ -429,6 +607,116 @@ impl Session {
         }
     }
 
+    fn family_ids(&self, ids: Option<&[u32]>) -> Result<Vec<u32>, FoundryError> {
+        match ids {
+            Some(ids) => {
+                for id in ids {
+                    self.font_by(Some(*id))?;
+                }
+                Ok(ids.to_vec())
+            }
+            None => {
+                let family = &self.font().ok_or(FoundryError::NoFont)?.style.family;
+                Ok(self
+                    .docs
+                    .iter()
+                    .filter(|doc| &doc.font.style.family == family)
+                    .map(|doc| doc.id)
+                    .collect())
+            }
+        }
+    }
+
+    fn font_mut_id(&mut self, id: u32) -> Result<&mut Font, FoundryError> {
+        self.docs
+            .iter_mut()
+            .find(|doc| doc.id == id)
+            .map(|doc| &mut doc.font)
+            .ok_or_else(|| FoundryError::Family(format!("no open font has id {id}")))
+    }
+
+    /// One undo step on each listed font, recorded before the edit.
+    fn remember_undo(&mut self, ids: &[u32]) {
+        for doc in &mut self.docs {
+            if !ids.contains(&doc.id) {
+                continue;
+            }
+            doc.undo.push(doc.font.clone());
+            if doc.undo.len() > UNDO_LIMIT {
+                doc.undo.remove(0);
+            }
+            doc.redo.clear();
+            doc.last_edit = None;
+            doc.dirty = true;
+        }
+    }
+
+    fn offset(
+        &mut self,
+        options: OffsetOptions,
+        kind: Option<StrokeKind>,
+        preview: bool,
+    ) -> Result<Option<Value>, Fail> {
+        if preview {
+            let mut copy = self.font().ok_or(FoundryError::NoFont)?.clone();
+            let changed = apply_offset(&mut copy, &options, kind)?;
+            return Ok(Some(preview_glyphs(&copy, &changed)));
+        }
+        let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+        let changed = apply_offset(font, &options, kind)?;
+        Ok(Some(json!({ "glyphs": changed })))
+    }
+
+    fn set_sidebearing(
+        &mut self,
+        name: String,
+        side: Side,
+        value: f64,
+        family: bool,
+        ids: Option<Vec<u32>>,
+    ) -> Result<Option<Value>, Fail> {
+        if !value.is_finite() {
+            return Err(FoundryError::NonFinite.into());
+        }
+        if !family {
+            let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+            font.set_sidebearing(&name, side, value)?;
+            return Ok(Some(json!({ "name": name, "side": side, "value": value })));
+        }
+        let targets = self.family_ids(ids.as_deref())?;
+        if targets.is_empty() {
+            return Err(FoundryError::Family("there are no styles to edit".into()).into());
+        }
+        for id in &targets {
+            let font = self.font_by(Some(*id))?;
+            let glyph = font
+                .glyph(&name)
+                .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?;
+            if side == Side::Left
+                && glyph
+                    .contours
+                    .iter()
+                    .all(|contour| contour.points.is_empty())
+            {
+                return Err(FoundryError::Edit(format!(
+                    "{name} has no outline in {}, so it has no left sidebearing",
+                    font.style.name
+                ))
+                .into());
+            }
+        }
+        self.remember_undo(&targets);
+        for id in &targets {
+            self.font_mut_id(*id)?.set_sidebearing(&name, side, value)?;
+        }
+        Ok(Some(json!({
+            "name": name,
+            "side": side,
+            "value": value,
+            "styles": targets.len(),
+        })))
+    }
+
     fn font_list(&self) -> Value {
         let fonts: Vec<Value> = self
             .docs
@@ -487,10 +775,7 @@ impl Session {
         let command = match serde_json::from_str::<Command>(trimmed) {
             Ok(command) => command,
             Err(err) => {
-                return Some(Response::fail(
-                    format!("could not read command: {err}"),
-                    None,
-                ));
+                return Some(Response::fail(explain_command_error(&err), None));
             }
         };
         Some(self.execute(command))
@@ -508,9 +793,9 @@ impl Session {
                 let id = self.add_font(font, false);
                 Ok(Some(self.summary(id)))
             }
-            Command::Save { path } => {
+            Command::Save { path, force } => {
                 let font = self.font().ok_or(FoundryError::NoFont)?;
-                font.save(Path::new(&path))?;
+                font.save_with(Path::new(&path), force)?;
                 if let Some(doc) = self.doc_mut() {
                     doc.dirty = false;
                 }
@@ -796,6 +1081,7 @@ impl Session {
                 weight,
                 italic,
                 italic_angle,
+                width,
             } => {
                 let font = self.font_mut().ok_or(FoundryError::NoFont)?;
                 font.set_style(StyleUpdate {
@@ -804,6 +1090,7 @@ impl Session {
                     weight,
                     italic,
                     italic_angle,
+                    width,
                 })?;
                 Ok(Some(json!({ "name": font.name, "style": font.style })))
             }
@@ -830,9 +1117,9 @@ impl Session {
                 }
                 Ok(Some(json!({ "family": file.family, "opened": opened })))
             }
-            Command::SaveFamily { path, ids } => {
+            Command::SaveFamily { path, ids, force } => {
                 let members = self.family_members(ids.as_deref())?;
-                let written = save_family(&members, Path::new(&path))?;
+                let written = save_family(&members, Path::new(&path), force)?;
                 let family_name = members.first().map(|font| font.style.family.clone());
                 for doc in &mut self.docs {
                     if Some(&doc.font.style.family) == family_name.as_ref() {
@@ -841,10 +1128,15 @@ impl Session {
                 }
                 Ok(Some(json!({ "path": path, "styles": paths(&written) })))
             }
-            Command::ExportFamily { dir, format, ids } => {
+            Command::ExportFamily {
+                dir,
+                format,
+                ids,
+                force,
+            } => {
                 let members = self.family_members(ids.as_deref())?;
                 let issues = check_family(&members);
-                let written = export_family(&members, Path::new(&dir), format)?;
+                let written = export_family(&members, Path::new(&dir), format, force)?;
                 Ok(Some(json!({ "files": paths(&written), "issues": issues })))
             }
             Command::FamilyCheck { ids } => {
@@ -860,14 +1152,205 @@ impl Session {
                     "issues": issues,
                 })))
             }
+            Command::SetInfo {
+                copyright,
+                designer,
+                license,
+                license_url,
+                version,
+                vendor,
+                unique_id,
+            } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.set_info(InfoUpdate {
+                    copyright,
+                    designer,
+                    license,
+                    license_url,
+                    version,
+                    vendor,
+                    unique_id,
+                })?;
+                Ok(Some(json!({ "info": font.info })))
+            }
+            Command::SetKerning { kerning } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.set_kerning(kerning)?;
+                Ok(Some(kerning_summary(font)))
+            }
+            Command::AddKern { left, right, value } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.add_kern_pair(left.clone(), right.clone(), value)?;
+                Ok(Some(
+                    json!({ "left": left, "right": right, "value": value }),
+                ))
+            }
+            Command::SetGroup { name, members } => {
+                let count = members.len();
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.set_kern_group(name.clone(), members)?;
+                Ok(Some(json!({ "name": name, "members": count })))
+            }
+            Command::AddLigature { glyphs, name } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.add_ligature(glyphs, name.clone())?;
+                Ok(Some(json!({ "name": name })))
+            }
+            Command::SetFeatures { text } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.set_features(text);
+                Ok(Some(json!({ "features": font.features.is_some() })))
+            }
+            Command::Offset {
+                horizontal,
+                vertical,
+                gap,
+                corner,
+                sidebearing,
+                keep_metrics,
+                add_points,
+                names,
+                preview,
+            } => self.offset(
+                OffsetOptions {
+                    horizontal,
+                    vertical,
+                    gap,
+                    corner,
+                    sidebearing,
+                    keep_metrics,
+                    add_points,
+                    names,
+                },
+                None,
+                preview,
+            ),
+            Command::Stroke {
+                kind,
+                horizontal,
+                vertical,
+                gap,
+                corner,
+                sidebearing,
+                keep_metrics,
+                add_points,
+                names,
+                preview,
+            } => self.offset(
+                OffsetOptions {
+                    horizontal,
+                    vertical,
+                    gap,
+                    corner,
+                    sidebearing,
+                    keep_metrics,
+                    add_points,
+                    names,
+                },
+                Some(kind),
+                preview,
+            ),
+            Command::SetSidebearing {
+                name,
+                side,
+                value,
+                family,
+                ids,
+            } => self.set_sidebearing(name, side, value, family, ids),
+            Command::CheckOutlines => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let issues = check_outlines(font);
+                Ok(Some(json!({ "issues": issues, "count": issues.len() })))
+            }
+            Command::CheckSpacing { min_gap, pairs } => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let issues = check_spacing(font, min_gap, pairs.as_deref())?;
+                Ok(Some(json!({ "issues": issues, "count": issues.len() })))
+            }
+            Command::Diff { a, b } => {
+                let before = Font::load(Path::new(&a))?;
+                let after = Font::load(Path::new(&b))?;
+                let diffs = diff_fonts(&before, &after);
+                Ok(Some(json!({ "glyphs": diffs, "count": diffs.len() })))
+            }
+            Command::Proof {
+                path,
+                text,
+                pixel_size,
+                guides,
+                boxes,
+                compare,
+                force,
+            } => {
+                let compare = match compare {
+                    Some(compare) => Some(Font::load(Path::new(&compare))?),
+                    None => None,
+                };
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let (width, height) = write_proof(
+                    font,
+                    Path::new(&path),
+                    &ProofOptions {
+                        text,
+                        pixel_size,
+                        guides,
+                        boxes,
+                        compare,
+                        force,
+                    },
+                )?;
+                Ok(Some(
+                    json!({ "path": path, "width": width, "height": height }),
+                ))
+            }
+            Command::MoveGlyph { name, index } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.move_glyph(&name, index)?;
+                Ok(Some(json!({ "name": name, "index": index })))
+            }
+            Command::CopyFamily {
+                path,
+                dir,
+                family,
+                label,
+                force,
+            } => {
+                let written = copy_family(
+                    Path::new(&path),
+                    Path::new(&dir),
+                    family.as_deref(),
+                    label.as_deref(),
+                    force,
+                )?;
+                Ok(Some(json!({ "path": written })))
+            }
+            Command::Slant { degrees } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                font.slant(degrees)?;
+                Ok(Some(json!({
+                    "italic": font.style.italic,
+                    "italic_angle": font.style.italic_angle,
+                })))
+            }
+            Command::ScaleWidth { factor, names } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                let changed = font.scale_width(factor, names.as_deref())?;
+                Ok(Some(json!({ "glyphs": changed, "factor": factor })))
+            }
             Command::History => self.history_data(),
             Command::Check { a, b } => compare_files(&a, &b),
-            Command::Blend { a, b, t, out } => {
+            Command::Blend {
+                a,
+                b,
+                t,
+                out,
+                force,
+            } => {
                 let left = Font::load(Path::new(&a))?;
                 let right = Font::load(Path::new(&b))?;
                 match blend_fonts(&left, &right, t) {
                     Ok(font) => {
-                        font.save(Path::new(&out))?;
+                        font.save_with(Path::new(&out), force)?;
                         let data = json!({
                             "path": out,
                             "name": font.name,
@@ -907,15 +1390,64 @@ impl Session {
             return Value::Null;
         };
         let font = &doc.font;
+        let encoded = font
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.unicode.is_some())
+            .count();
         json!({
             "id": id,
             "name": font.name,
             "upm": font.upm,
             "metrics": font.metrics,
             "style": font.style,
+            "info": font.info,
+            "coverage": { "glyphs": font.glyphs.len(), "encoded": encoded },
+            "kerning": kerning_summary(font),
             "glyphs": font.glyph_names(),
         })
     }
+}
+
+fn kerning_summary(font: &Font) -> Value {
+    let kerning = font.kerning.as_ref();
+    json!({
+        "pairs": kerning.map(|kerning| kerning.pairs.len()).unwrap_or(0),
+        "groups": kerning.map(|kerning| kerning.groups.len()).unwrap_or(0),
+        "ligatures": kerning.map(|kerning| kerning.ligatures.len()).unwrap_or(0),
+    })
+}
+
+fn apply_offset(
+    font: &mut Font,
+    options: &OffsetOptions,
+    kind: Option<StrokeKind>,
+) -> Result<Vec<String>, FoundryError> {
+    match kind {
+        Some(kind) => stroke_font(font, options, kind),
+        None => offset_font(font, options),
+    }
+}
+
+fn preview_glyphs(font: &Font, names: &[String]) -> Value {
+    let glyphs: Vec<Value> = names
+        .iter()
+        .filter_map(|name| font.glyph(name))
+        .filter_map(|glyph| serde_json::to_value(glyph).ok())
+        .collect();
+    json!({ "preview": true, "glyphs": glyphs })
+}
+
+/// serde already names the missing field. Say that in a sentence a script can show.
+fn explain_command_error(err: &serde_json::Error) -> String {
+    let text = err.to_string();
+    if let Some(rest) = text.strip_prefix("missing field `")
+        && let Some(end) = rest.find('`')
+    {
+        let field = &rest[..end];
+        return format!("the command is missing the field `{field}`");
+    }
+    format!("could not read command: {text}")
 }
 
 fn paths(written: &[std::path::PathBuf]) -> Vec<String> {
@@ -1024,6 +1556,7 @@ mod tests {
             session
                 .execute(Command::Save {
                     path: narrow_path.to_string_lossy().into_owned(),
+                    force: false,
                 })
                 .ok
         );
@@ -1047,6 +1580,7 @@ mod tests {
             session
                 .execute(Command::Save {
                     path: wide_path.to_string_lossy().into_owned(),
+                    force: false,
                 })
                 .ok
         );
@@ -1056,6 +1590,7 @@ mod tests {
             b: wide_path.to_string_lossy().into_owned(),
             t: 0.5,
             out: mid_path.to_string_lossy().into_owned(),
+            force: false,
         });
         assert!(blended.ok, "{blended:?}");
         let opened = Font::load(&mid_path).unwrap();
@@ -1089,6 +1624,7 @@ mod tests {
         );
         let saved = session.execute(Command::Save {
             path: ufo_path.to_string_lossy().into_owned(),
+            force: false,
         });
         assert!(saved.ok, "{saved:?}");
         let moved = session.execute(Command::MovePoint {
@@ -1101,6 +1637,7 @@ mod tests {
         assert!(moved.ok, "{moved:?}");
         let saved_json = session.execute(Command::Save {
             path: json_path.to_string_lossy().into_owned(),
+            force: false,
         });
         assert!(saved_json.ok, "{saved_json:?}");
         let opened = Font::load(&json_path).unwrap();
@@ -1286,7 +1823,10 @@ mod tests {
         assert_eq!(data["style"]["italic_angle"], json!(-12.0));
         assert_eq!(session.font().unwrap().name, "Wide Italic");
         assert_eq!(session.history(), (0, 0));
-        assert!(first_x(&session) == 0.0);
+        // The bottom point sits on the baseline, so the shear leaves it and the recentering
+        // shift is what moves it. The ink box stays centred in the advance.
+        let centered = -120.0 * 12.0_f64.to_radians().tan() / 2.0;
+        assert!((first_x(&session) - centered).abs() < 1e-9);
 
         line(
             &mut session,
@@ -1306,10 +1846,10 @@ mod tests {
             &mut session,
             &format!(r#"{{"op":"glyph","name":"H","font":{italic}}}"#),
         );
-        assert_eq!(
-            other.data.unwrap()["contours"][0]["points"][0]["x"],
-            json!(7.0)
-        );
+        let italic_x = other.data.unwrap()["contours"][0]["points"][0]["x"]
+            .as_f64()
+            .unwrap();
+        assert!((italic_x - (centered + 7.0)).abs() < 1e-9);
 
         let listed = line(&mut session, r#"{"op":"fonts"}"#).data.unwrap();
         assert_eq!(listed["fonts"].as_array().unwrap().len(), 2);
@@ -1366,5 +1906,140 @@ mod tests {
         assert!(!line(&mut session, r#"{"op":"select_font","id":999}"#).ok);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_refuses_an_existing_file_unless_forced() {
+        let dir = temp_dir();
+        let file = dir.join("wide.json").to_string_lossy().replace('\\', "/");
+        let mut session = Session::new();
+        session.execute(Command::Create {
+            name: "Wide".into(),
+            upm: 1000,
+        });
+        assert!(
+            session
+                .execute(Command::Save {
+                    path: file.clone(),
+                    force: false,
+                })
+                .ok
+        );
+        let refused = session.execute(Command::Save {
+            path: file.clone(),
+            force: false,
+        });
+        assert!(!refused.ok);
+        assert!(refused.error.unwrap().contains("force"));
+        assert!(
+            session
+                .execute(Command::Save {
+                    path: file,
+                    force: true,
+                })
+                .ok
+        );
+        assert!(dir.join("wide.json.bak").is_file());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_point_field_names_the_field() {
+        let mut session = Session::new();
+        let response = session
+            .execute_line(
+                r#"{"op":"put_glyph","glyph":{"name":"H","advance":100,"contours":[{"closed":true,"points":[{"x":0,"y":0,"kind":"on"}]}]}}"#,
+            )
+            .unwrap();
+        assert!(!response.ok);
+        let error = response.error.unwrap();
+        assert!(error.contains("`smooth`"), "{error}");
+    }
+
+    #[test]
+    fn offset_is_one_undo_and_a_preview_leaves_the_font() {
+        let mut session = Session::new();
+        session.execute(Command::Create {
+            name: "Offset".into(),
+            upm: 1000,
+        });
+        assert!(
+            session
+                .execute(Command::PutGlyph {
+                    glyph: square("H", 100.0, 400.0),
+                })
+                .ok
+        );
+        let before = session.font().unwrap().glyph("H").unwrap().contours[0].points[0].x;
+        let preview = line(
+            &mut session,
+            r#"{"op":"offset","horizontal":15,"vertical":4,"names":["H"],"preview":true}"#,
+        );
+        assert!(preview.ok, "{preview:?}");
+        assert_eq!(preview.data.unwrap()["preview"], json!(true));
+        assert_eq!(
+            session.font().unwrap().glyph("H").unwrap().contours[0].points[0].x,
+            before
+        );
+        assert_eq!(session.history(), (1, 0));
+        let applied = line(
+            &mut session,
+            r#"{"op":"offset","horizontal":15,"vertical":4,"names":["H"]}"#,
+        );
+        assert!(applied.ok, "{applied:?}");
+        let moved = session.font().unwrap().glyph("H").unwrap().contours[0].points[0].x;
+        assert!(moved < before, "{moved}");
+        assert_eq!(
+            session.font().unwrap().glyph("H").unwrap().contours[0]
+                .points
+                .len(),
+            4
+        );
+        assert_eq!(
+            session.font().unwrap().glyph("H").unwrap().contours[0].points[0].y,
+            0.0
+        );
+        assert!(line(&mut session, r#"{"op":"undo"}"#).ok);
+        assert_eq!(
+            session.font().unwrap().glyph("H").unwrap().contours[0].points[0].x,
+            before
+        );
+    }
+
+    #[test]
+    fn a_family_sidebearing_sets_every_open_style() {
+        let mut session = Session::new();
+        line(&mut session, r#"{"op":"create","name":"Wide"}"#);
+        line(
+            &mut session,
+            r#"{"op":"put_glyph","glyph":{"name":"f","advance":300,"contours":[{"closed":true,"points":[{"x":40,"y":0,"kind":"on","smooth":false},{"x":140,"y":0,"kind":"on","smooth":false},{"x":140,"y":100,"kind":"on","smooth":false},{"x":40,"y":100,"kind":"on","smooth":false}]}]}}"#,
+        );
+        assert!(
+            line(
+                &mut session,
+                r#"{"op":"set_style","family":"Wide","style":"Regular"}"#,
+            )
+            .ok
+        );
+        assert!(
+            line(
+                &mut session,
+                r#"{"op":"derive_style","style":"Bold","weight":700}"#,
+            )
+            .ok
+        );
+        let set = line(
+            &mut session,
+            r#"{"op":"set_sidebearing","name":"f","side":"right","value":32,"family":true}"#,
+        );
+        assert!(set.ok, "{set:?}");
+        assert_eq!(set.data.unwrap()["styles"], json!(2));
+        assert!((session.font().unwrap().glyph("f").unwrap().advance - 172.0).abs() < 0.01);
+        assert!(line(&mut session, r#"{"op":"undo"}"#).ok);
+        assert!((session.font().unwrap().glyph("f").unwrap().advance - 300.0).abs() < 0.01);
+        assert!(line(&mut session, r#"{"op":"select_font","id":1}"#).ok);
+        assert!((session.font().unwrap().glyph("f").unwrap().advance - 172.0).abs() < 0.01);
+        assert!(line(&mut session, r#"{"op":"undo"}"#).ok);
+        assert!((session.font().unwrap().glyph("f").unwrap().advance - 300.0).abs() < 0.01);
     }
 }

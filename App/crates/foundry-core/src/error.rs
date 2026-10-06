@@ -9,6 +9,12 @@ pub enum FoundryError {
     Version(u32),
     GlyphName,
     DuplicateGlyph(String),
+    DuplicateUnicode {
+        code: u32,
+        glyph: String,
+        other: String,
+    },
+    Exists(String),
     EmptyContour(String),
     NonFinite,
     MissingGlyph(String),
@@ -38,6 +44,13 @@ impl fmt::Display for FoundryError {
             Self::Version(found) => write!(f, "unsupported font version {found}"),
             Self::GlyphName => write!(f, "glyph name is empty"),
             Self::DuplicateGlyph(name) => write!(f, "duplicate glyph {name}"),
+            Self::DuplicateUnicode { code, glyph, other } => {
+                write!(f, "U+{code:04X} is used by both {other} and {glyph}")
+            }
+            Self::Exists(path) => write!(
+                f,
+                "{path} already exists. Pass force to overwrite it. A copy is kept beside the file, with .bak added to the name."
+            ),
             Self::EmptyContour(name) => write!(f, "glyph {name} has a contour with no points"),
             Self::NonFinite => write!(f, "a coordinate or advance is not a finite number"),
             Self::MissingGlyph(name) => write!(f, "glyph {name} is not in the open font"),

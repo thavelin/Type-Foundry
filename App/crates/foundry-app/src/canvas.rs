@@ -19,7 +19,8 @@ impl FoundryWindow {
     pub fn canvas(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, CornerRadius::ZERO, color(BONE));
+        let (paper, ink) = self.canvas_colors();
+        painter.rect_filled(rect, CornerRadius::ZERO, paper);
 
         let Some(name) = self.current.clone() else {
             hint(
@@ -75,7 +76,7 @@ impl FoundryWindow {
             self.paint_metrics(&painter, &view, rect, outline.advance);
         }
         if self.settings.fill {
-            paint_fill(&painter, &view, rect, &outline, Color32::BLACK);
+            paint_fill(&painter, &view, rect, &outline, ink);
         }
         // Another style of the family, drawn over the fill so it shows on ink and paper alike.
         if let (Some(id), Some(name)) = (self.compare, self.current.clone())
@@ -84,7 +85,7 @@ impl FoundryWindow {
             paint_stroke(&painter, &view, &other, Stroke::new(1.5, color(MUTED)));
         }
         if self.settings.outline || !self.settings.fill {
-            paint_stroke(&painter, &view, &outline, Stroke::new(1.25, Color32::BLACK));
+            paint_stroke(&painter, &view, &outline, Stroke::new(1.25, ink));
         }
         if self.effects.open
             && let Some(ghost) = self.effects.preview(&outline, &self.selection)
@@ -105,6 +106,15 @@ impl FoundryWindow {
             bounds.max.x = bounds.max.x.max(right);
         }
         Viewport::fit(bounds_of(rect), bounds, FIT_MARGIN)
+    }
+
+    /// Editor paper and the fill drawn on it. White is the bone paper.
+    pub(crate) fn canvas_colors(&self) -> (Color32, Color32) {
+        if self.settings.dark_canvas {
+            (Color32::BLACK, Color32::WHITE)
+        } else {
+            (color(BONE), Color32::BLACK)
+        }
     }
 
     /// Font x of the previous glyph's origin, and of the far side of the next glyph.

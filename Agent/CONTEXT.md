@@ -33,7 +33,7 @@ PM notes live here. Product code lives in `App/`. Plugins, the CLI, and agents s
 
 ## How a font is stored
 
-The working file is JSON, `format` `typefoundry.font`, `version` 1. A glyph is contours of `on` and `off` points, an advance, and an optional unicode. `open`, `save`, `check`, and `blend` also read and write a `.ufo` directory through the same commands. `open` also reads a Three.js typeface JSON file, a webfontjson file, `.ttf`, `.otf`, `.ttc`, `.otc`, and WOFF 1 (`.woff`, unpacked into an sfnt). WOFF2 and Embedded OpenType are refused. Saving over `.otf`, `.ttc`, `.otc`, `.woff`, `.woff2`, or `.eot` is refused. UFO import keeps the default layer, sorts glyph names, and keeps the first Unicode value. Anchors, guidelines, kerning, groups, and lib data are ignored. Components, images, and implied-on qcurves are refused. `save` to a `.ttf` path writes an installable TrueType file: cubics become quadratics, open contours are closed with a straight edge, and Unicode outside the Basic Multilingual Plane is refused. The name table includes a unique identifier (name ID 3) and `Version 1.000` (name ID 5). Windows Font Viewer rejects a file that omits the unique name. Glyph data is padded so every `loca` offset is even.
+The working file is JSON, `format` `typefoundry.font`, `version` 1. A glyph is contours of `on` and `off` points, an advance, and an optional unicode. `open`, `save`, `check`, and `blend` also read and write a `.ufo` directory through the same commands. `open` also reads a Three.js typeface JSON file, a webfontjson file, `.ttf`, `.otf`, `.ttc`, `.otc`, and WOFF 1 (`.woff`) and WOFF2 (`.woff2`), both unpacked into an sfnt with `wuff`. Embedded OpenType is refused. Saving over `.otf`, `.ttc`, `.otc`, `.woff`, `.woff2`, or `.eot` is refused. UFO import keeps the default layer, sorts glyph names, and keeps the first Unicode value. Anchors and guidelines are ignored. Components are flattened into their glyph on import. Kerning groups, kerning pairs, ligatures, and `features.fea` are kept. A save over an existing UFO updates fontinfo and the default layer and leaves lib data, images, and other layers in place. Images and implied-on qcurves are refused. `save` to a `.ttf` path writes an installable TrueType file: cubics become quadratics, open contours are closed with a straight edge, and Unicode outside the Basic Multilingual Plane is refused. The name table includes a unique identifier (name ID 3) and a version (name ID 5). An empty unique id is the PostScript name plus the version, with no foundry prefix. An empty vendor id is four spaces. Windows Font Viewer rejects a file that omits the unique name. Glyph data is padded so every `loca` offset is even. `save`, `blend`, and the family exports refuse to replace an existing file unless `force` is set, and then keep the previous file as `name.bak`. The drawing window saves with `force`.
 
 ## How blend works
 
@@ -62,6 +62,39 @@ Frozen for now:
 - Cargo target directory stays on `C:`.
 
 ## Session log
+
+### 2026-10-06 — Components, WOFF2, offset arcs, PDF proof, Open recent
+
+- Focus: the five leftovers from the 2026-10-05 entry, plus File > Open recent. Persistent sessions stay out. Variable fonts stay later.
+- Components: a UFO glyph's components are flattened into its contours on import, moved by the component transform (UFO spec order). A missing base or a component that uses itself is named. A save writes the flattened outline, not the reference.
+- WOFF2: `wuff` (pure Rust, MIT) decodes it into an sfnt, so `open`, `check`, `blend`, and webfontjson read it. A broken file is named. Test builds a real WOFF2 with `ttf2woff2` (dev-dependency only).
+- Offset adds points: `add_points` with `corner: round` on `offset` and `stroke`. Each sharp outside corner becomes two on-curve ends and one cubic. Needs both amounts non-zero; with `keep_metrics`, metric-line corners stay sharp. Arcs go last, after gap limiting.
+- PDF proof: `proof` writes a one-page vector PDF when the path ends in `.pdf`. Curves are kept, no font is embedded, and the content stream is zlib-compressed. Rendered with PyMuPDF to check it draws.
+- Open recent: File > Open recent, ten entries kept in the window settings (`recent`), updated on open and save, with Clear list. Missing files show disabled.
+- Validation: `powershell -ExecutionPolicy Bypass -File App/scripts/check.ps1` passed. clippy clean.
+- Not done: hinting. "Automatic hinting" was not defined in the notes and is not started. Variable fonts. Components are not kept as references.
+- Git: committed locally on `main`, not pushed. `origin/main` (`734756a`) has two commits that are not here: `bbb79af` "Sanitize repository for public sharing" and its merge PR #5. They delete `Agent/CONTEXT.md`, `AGENTS.md`, `_CONTEXT.md`, `App/.cargo/config.toml`, and `documents/day-2-agent-prompt.md`, and they remove personal paths from `README.md`, `documents/api.md`, `svgfont.rs`, and `main.rs`. This branch still carries those personal paths in `Agent/CONTEXT.md`, so a push to `main` would undo the sanitize. Push is held until Troy decides how to reconcile.
+- Not committed on purpose: the untracked `_CONTEXT.md` files (generated by a local model, with inaccurate content) and `documents/screenshots/`.
+
+### Next plans
+
+1. Decide hinting. Options: skip for now; a basic automatic hinter (large, limited quality); or keep an imported TTF's hinting and write it back until the outlines change.
+2. Reconcile with origin before any push. Options: keep the session log and personal paths out of the repo (private file, or git-ignored); or rebase this work onto `734756a` and re-check the paths.
+3. Exercise `add_points` through `foundry run` and the window with a screenshot, since only the unit tests cover it now.
+4. Components as references. This changes the model and blending, so it needs Troy's decision first.
+5. Variable fonts (`fvar` / `gvar`). Deferred by Troy.
+6. Review the untracked `_CONTEXT.md` files. Keep or delete them.
+
+### 2026-10-05 — Overwrite protection, metadata, kerning, and offset path
+
+- Focus: the working-session list. Overwrite protection, export metadata, and kerning first, then the weight, italic, check, and proof tools that were blocking family work.
+- `save`, `blend`, `new`, `save_family`, `export_family`, and `proof` refuse an existing file unless `force` is set. A forced write keeps `name.bak`. Saving a `.ufo` no longer deletes `features.fea`, lib data, images, or other layers. The window's Save and family export pass `force`. Command and MCP saves stay strict.
+- Name-table fields live on the font: copyright, designer, licence, licence URL, version, a four-character vendor id, and the unique id. Dots stay in file names and PostScript names, so `v4.5` does not become `v45`. Width class is an OS/2 value from 1 to 9. A duplicate Unicode value is an error.
+- Kerning groups and pairs, and ligatures such as `fi`, are stored in the JSON, written to UFO and to a TrueType `kern` table plus a `liga` lookup, and read back from UFO and from binary fonts.
+- `offset` moves existing points, with separate horizontal and vertical amounts, so a weight change stays compatible. Metrics can stay put, growth can stop at a gap, and a preview returns the outlines without changing the font. `stroke` builds an outline or inline. `scale_width` changes width and keeps stem thickness. `slant` recenters each glyph in its advance.
+- Also wired: family sidebearings with one undo step per style, outline and spacing checks, compatibility issues that name the contour and point, `foundry proof` to PNG, `foundry diff`, `move_glyph`, `copy_family` for a version folder, and `foundry run` JSON that escapes non-ASCII as `\u`. A missing JSON field is named in the error. `foundry info` prints metrics, style, coverage, and kerning counts. MCP is 38 tools.
+- Validation: `powershell -ExecutionPolicy Bypass -File App/scripts/check.ps1` passed. 104 tests, 1 ignored Roboto regen, clippy clean.
+- Not done: a variable font (`fvar`/`gvar`), components, WOFF2, hinting, a session that survives the process exiting, an offset mode that adds points, and a PDF proof. MCP does not wrap every older edit command. `foundry run` is still the full command stream. Not committed. Not pushed.
 
 ### 2026-10-04 — Editor tools are on main
 

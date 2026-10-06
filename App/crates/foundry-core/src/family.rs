@@ -24,6 +24,7 @@ pub struct StyleUpdate {
     pub weight: Option<u16>,
     pub italic: Option<bool>,
     pub italic_angle: Option<f64>,
+    pub width: Option<u16>,
 }
 
 /// Formats a family exports to.
@@ -64,6 +65,9 @@ pub struct FamilyFile {
     pub family: String,
     /// Member font files, relative to the family file.
     pub styles: Vec<String>,
+    /// A version note, such as `v4.6`. Old family files omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl Font {
@@ -102,6 +106,14 @@ impl Font {
             }
             style.italic_angle = angle;
         }
+        if let Some(width) = update.width {
+            if !(1..=9).contains(&width) {
+                return Err(FoundryError::Style(format!(
+                    "width class {width} is outside 1-9"
+                )));
+            }
+            style.width = width;
+        }
         let renamed = style.family != self.style.family || style.name != self.style.name;
         self.style = style;
         if renamed {
@@ -134,10 +146,65 @@ impl Font {
             ..StyleUpdate::default()
         })?;
         if leaning {
-            let shear = slant.to_radians().tan();
-            derived.transform(None, None, [1.0, 0.0, shear, 1.0, 0.0, 0.0], false)?;
+            derived.slant_glyphs(slant)?;
         }
         Ok(derived)
+    }
+
+    /// Shear every glyph about the baseline, then shift it so the ink stays centred in its advance.
+    pub fn slant_glyphs(&mut self, degrees: f64) -> Result<(), FoundryError> {
+        if !degrees.is_finite() || degrees.abs() >= 60.0 {
+            return Err(FoundryError::Style(format!(
+                "slant {degrees} must be between -60 and 60 degrees"
+            )));
+        }
+        if degrees == 0.0 {
+            return Ok(());
+        }
+        let shear = degrees.to_radians().tan();
+        for glyph in &mut self.glyphs {
+            let before = ink_center_x(glyph);
+            for contour in &mut glyph.contours {
+                for point in &mut contour.points {
+                    point.x += point.y * shear;
+                }
+            }
+            if let (Some(before), Some(after)) = (before, ink_center_x(glyph)) {
+                let dx = before - after;
+                for contour in &mut glyph.contours {
+                    for point in &mut contour.points {
+                        point.x += dx;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Slant the open font in place, mark it italic, and store the new italic angle.
+    pub fn slant(&mut self, degrees: f64) -> Result<(), FoundryError> {
+        self.slant_glyphs(degrees)?;
+        if degrees != 0.0 {
+            self.style.italic = true;
+            self.style.italic_angle -= degrees;
+        }
+        Ok(())
+    }
+}
+
+fn ink_center_x(glyph: &crate::font::Glyph) -> Option<f64> {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    for contour in &glyph.contours {
+        for point in &contour.points {
+            min_x = min_x.min(point.x);
+            max_x = max_x.max(point.x);
+        }
+    }
+    if min_x.is_finite() {
+        Some((min_x + max_x) / 2.0)
+    } else {
+        None
     }
 }
 
@@ -282,6 +349,7 @@ pub fn export_family(
     fonts: &[&Font],
     dir: &Path,
     format: ExportFormat,
+    force: bool,
 ) -> Result<Vec<PathBuf>, FoundryError> {
     if fonts.is_empty() {
         return Err(FoundryError::Family("there are no styles to export".into()));
@@ -289,23 +357,50 @@ pub fn export_family(
     if let Some(message) = blocking_message(&check_family(fonts)) {
         return Err(FoundryError::Family(message));
     }
-    fs::create_dir_all(dir).map_err(|err| FoundryError::Io(err.to_string()))?;
-    let mut written = Vec::new();
-    for font in fonts {
-        let path = dir.join(format!("{}.{}", font.file_stem(), format.extension()));
-        font.save(&path)?;
-        written.push(path);
+    let paths: Vec<PathBuf> = fonts
+        .iter()
+        .map(|font| dir.join(format!("{}.{}", font.file_stem(), format.extension())))
+        .collect();
+    if !force {
+        for path in &paths {
+            if path.exists() {
+                return Err(FoundryError::Exists(path.display().to_string()));
+            }
+        }
     }
-    Ok(written)
+    fs::create_dir_all(dir).map_err(|err| FoundryError::Io(err.to_string()))?;
+    for (font, path) in fonts.iter().zip(&paths) {
+        font.save_with(path, force)?;
+    }
+    Ok(paths)
 }
 
 /// Save every style as JSON beside the family file, then the family file listing them.
-pub fn save_family(fonts: &[&Font], path: &Path) -> Result<Vec<PathBuf>, FoundryError> {
+pub fn save_family(
+    fonts: &[&Font],
+    path: &Path,
+    force: bool,
+) -> Result<Vec<PathBuf>, FoundryError> {
+    save_family_labeled(fonts, path, None, force)
+}
+
+fn save_family_labeled(
+    fonts: &[&Font],
+    path: &Path,
+    label: Option<String>,
+    force: bool,
+) -> Result<Vec<PathBuf>, FoundryError> {
+    if fonts.is_empty() {
+        return Err(FoundryError::Family("there are no styles to save".into()));
+    }
+    if path.exists() && !force {
+        return Err(FoundryError::Exists(path.display().to_string()));
+    }
     let dir = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let written = export_family(fonts, &dir, ExportFormat::Json)?;
+    let written = export_family(fonts, &dir, ExportFormat::Json, force)?;
     let file = FamilyFile {
         format: FAMILY_FORMAT.to_string(),
         version: FAMILY_VERSION,
@@ -315,12 +410,49 @@ pub fn save_family(fonts: &[&Font], path: &Path) -> Result<Vec<PathBuf>, Foundry
             .filter_map(|member| member.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .collect(),
+        label,
     };
+    crate::save::prepare_write(path, force)?;
     let mut text =
         serde_json::to_string_pretty(&file).map_err(|err| FoundryError::Json(err.to_string()))?;
     text.push('\n');
     fs::write(path, text).map_err(|err| FoundryError::Io(err.to_string()))?;
     Ok(written)
+}
+
+/// Copy a family into `dest_dir`. `family`, when set, renames every style's family. `label` is
+/// stored on the new family file, so v4.6 can be made from v4.5 in one step.
+pub fn copy_family(
+    source: &Path,
+    dest_dir: &Path,
+    family: Option<&str>,
+    label: Option<&str>,
+    force: bool,
+) -> Result<PathBuf, FoundryError> {
+    let (file, members) = load_family(source)?;
+    let mut fonts: Vec<Font> = members.into_iter().map(|(_, font)| font).collect();
+    if let Some(family) = family {
+        for font in &mut fonts {
+            font.set_style(StyleUpdate {
+                family: Some(family.to_string()),
+                ..StyleUpdate::default()
+            })?;
+        }
+    }
+    fs::create_dir_all(dest_dir).map_err(|err| FoundryError::Io(err.to_string()))?;
+    let file_name = source
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "family.json".into());
+    let dest = dest_dir.join(file_name);
+    let refs: Vec<&Font> = fonts.iter().collect();
+    let stored_label = label
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .or(file.label);
+    save_family_labeled(&refs, &dest, stored_label, force)?;
+    Ok(dest)
 }
 
 /// Read a family file and every style it lists. Fails on the first style that does not load.
@@ -368,6 +500,18 @@ mod tests {
         let path = std::env::temp_dir().join(format!("typefoundry-family-{tick}-{id}"));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn file_names_keep_version_dots() {
+        let mut font = Font::new("Vostok", 1000).unwrap();
+        font.set_style(StyleUpdate {
+            family: Some("VostokSerifv4.5".into()),
+            name: Some("Regular".into()),
+            ..StyleUpdate::default()
+        })
+        .unwrap();
+        assert_eq!(font.file_stem(), "VostokSerifv4.5-Regular");
     }
 
     fn regular() -> Font {
@@ -420,10 +564,11 @@ mod tests {
         assert_eq!(italic.name, "Wide Italic");
         assert!(italic.style.italic);
         assert_eq!(italic.style.italic_angle, -12.0);
-        let top = &italic.glyph("H").unwrap().contours[0].points[2];
+        let top = italic.glyph("H").unwrap().contours[0].points[2].x;
+        let bottom = italic.glyph("H").unwrap().contours[0].points[0].x;
         let lean = 700.0 * 12f64.to_radians().tan();
-        assert!((top.x - (200.0 + lean)).abs() < 1e-9, "{}", top.x);
-        assert_eq!(italic.glyph("H").unwrap().contours[0].points[0].x, 100.0);
+        assert!((top - (200.0 + lean / 2.0)).abs() < 1e-6, "{top}");
+        assert!((bottom - (100.0 - lean / 2.0)).abs() < 1e-6, "{bottom}");
         assert_eq!(italic.legacy_names(), ("Wide".into(), "Italic".into()));
         assert!(upright.derive_style("Back", None, None, 75.0).is_err());
 
@@ -507,7 +652,7 @@ mod tests {
         let italic = upright.derive_style("Italic", None, None, 12.0).unwrap();
 
         let family_path = dir.join("Wide.family.json");
-        let written = save_family(&[&upright, &italic], &family_path).unwrap();
+        let written = save_family(&[&upright, &italic], &family_path, false).unwrap();
         assert_eq!(
             written,
             vec![dir.join("Wide-Regular.json"), dir.join("Wide-Italic.json")]
@@ -515,10 +660,22 @@ mod tests {
         let (file, members) = load_family(&family_path).unwrap();
         assert_eq!(file.family, "Wide");
         assert_eq!(file.styles, vec!["Wide-Regular.json", "Wide-Italic.json"]);
-        assert_eq!(members[1].1, italic);
+        assert_eq!(members[1].1.style, italic.style);
+        assert_eq!(members[1].1.name, italic.name);
+        let loaded_h = &members[1].1.glyph("H").unwrap().contours[0].points;
+        let source_h = &italic.glyph("H").unwrap().contours[0].points;
+        for (loaded, source) in loaded_h.iter().zip(source_h) {
+            assert!(
+                (loaded.x - source.x).abs() < 1e-6,
+                "{} {}",
+                loaded.x,
+                source.x
+            );
+            assert!((loaded.y - source.y).abs() < 1e-6);
+        }
 
         let out = dir.join("ttf");
-        let fonts = export_family(&[&upright, &italic], &out, ExportFormat::Ttf).unwrap();
+        let fonts = export_family(&[&upright, &italic], &out, ExportFormat::Ttf, false).unwrap();
         assert_eq!(fonts[1], out.join("Wide-Italic.ttf"));
         let reread = Font::load(&fonts[1]).unwrap();
         assert_eq!(reread.style.family, "Wide");
@@ -527,8 +684,13 @@ mod tests {
         assert!((reread.style.italic_angle + 12.0).abs() < 0.01);
         assert_eq!(reread.style.weight, 400);
 
-        let ufos =
-            export_family(&[&upright, &italic], &dir.join("ufo"), ExportFormat::Ufo).unwrap();
+        let ufos = export_family(
+            &[&upright, &italic],
+            &dir.join("ufo"),
+            ExportFormat::Ufo,
+            false,
+        )
+        .unwrap();
         let ufo = Font::load(&ufos[1]).unwrap();
         assert_eq!(
             (ufo.style.family.as_str(), ufo.style.name.as_str()),
@@ -537,7 +699,12 @@ mod tests {
         assert!(ufo.style.italic);
 
         let twin = upright.clone();
-        let refused = export_family(&[&upright, &twin], &dir.join("twins"), ExportFormat::Ttf);
+        let refused = export_family(
+            &[&upright, &twin],
+            &dir.join("twins"),
+            ExportFormat::Ttf,
+            false,
+        );
         assert!(matches!(refused, Err(FoundryError::Family(_))));
         assert!(
             !dir.join("twins").exists(),

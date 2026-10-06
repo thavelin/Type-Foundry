@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use eframe::egui::{self, Pos2, Rect, Stroke};
-use foundry_app::palette::{AMBER, FOCUS};
+use foundry_app::palette::{FOCUS, GUIDE};
 use foundry_app::{Pt, Viewport};
 use serde::{Deserialize, Serialize};
 
@@ -200,32 +200,37 @@ impl FoundryWindow {
         }
         let family = self.guide_family();
         let font = egui::FontId::monospace(10.0);
+        let (_paper, ink) = self.canvas_colors();
+        let halo = Stroke::new(3.5, ink);
         for (index, guide) in self.guides_for(&family).iter().enumerate() {
             let selected = self.selected_guide == Some(index);
             let stroke = if selected {
-                Stroke::new(1.5, color(FOCUS))
+                Stroke::new(2.0, color(FOCUS))
             } else {
-                Stroke::new(1.0, color(AMBER))
+                Stroke::new(1.75, color(GUIDE))
             };
+            let label = if selected { color(FOCUS) } else { color(GUIDE) };
             if guide.vertical {
                 let x = view.to_screen(Pt::new(guide.at, 0.0)).x as f32;
+                painter.vline(x, rect.y_range(), halo);
                 painter.vline(x, rect.y_range(), stroke);
                 painter.text(
                     Pos2::new(x + 4.0, rect.top() + 4.0),
                     egui::Align2::LEFT_TOP,
                     format!("{:.0}", guide.at),
                     font.clone(),
-                    color(AMBER),
+                    label,
                 );
             } else {
                 let y = view.to_screen(Pt::new(0.0, guide.at)).y as f32;
+                painter.hline(rect.x_range(), y, halo);
                 painter.hline(rect.x_range(), y, stroke);
                 painter.text(
                     Pos2::new(rect.left() + 6.0, y - 2.0),
                     egui::Align2::LEFT_BOTTOM,
                     format!("{:.0}", guide.at),
                     font.clone(),
-                    color(AMBER),
+                    label,
                 );
             }
         }

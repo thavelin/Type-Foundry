@@ -18,6 +18,8 @@ pub mod palette {
     pub const BONE: u32 = 0xF3EEE4;
     pub const FOCUS: u32 = 0xD8FF00;
     pub const AMBER: u32 = 0xE8B65A;
+    /// Editor guides. Bright enough to read on the bone paper and on black.
+    pub const GUIDE: u32 = 0x3D8BFF;
     pub const SIGNAL: u32 = 0x8AE6A3;
     pub const ALERT: u32 = 0xF07461;
     pub const INVERSE: u32 = 0x030303;

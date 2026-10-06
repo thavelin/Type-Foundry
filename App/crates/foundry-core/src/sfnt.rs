@@ -3,7 +3,7 @@
 //!
 //! Outlines arrive as the parser draws them. Composite glyphs are decomposed, TrueType implied
 //! on-curve points become real on-curve points, and a variable font gives its default instance.
-//! WOFF 1 is unpacked into an sfnt, then read the same way. WOFF2 is recognised and refused.
+//! WOFF 1 and WOFF2 are unpacked into an sfnt, then read the same way.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -14,14 +14,15 @@ use std::path::Path;
 use ttf_parser::{Face, GlyphId, OutlineBuilder, Tag, name_id};
 
 use crate::error::FoundryError;
-use crate::font::{Contour, Font, Glyph, MAX_UPM, MIN_UPM, Point, PointKind, validate_glyph};
+use crate::font::{
+    Contour, Font, Glyph, KernPair, Kerning, Ligature, MAX_UPM, MIN_UPM, Point, PointKind,
+    validate_glyph,
+};
 
 /// Windows language ID for English (United States) in the `name` table.
 const ENGLISH_US: u16 = 0x0409;
 /// Extensions [`Font::load`] reads as a binary font.
-const IMPORT_EXTENSIONS: [&str; 5] = ["ttf", "otf", "ttc", "otc", "woff"];
-/// A known font file that is refused, so the error can name the format.
-const REFUSED_EXTENSIONS: [&str; 1] = ["woff2"];
+const IMPORT_EXTENSIONS: [&str; 6] = ["ttf", "otf", "ttc", "otc", "woff", "woff2"];
 const WOFF_HEADER: usize = 48;
 const WOFF_ENTRY: usize = 20;
 
@@ -34,19 +35,13 @@ fn extension(path: &Path) -> Option<String> {
 /// True when [`Font::load`] should read the path as a binary font, including WOFF2 so it can
 /// refuse it by name.
 pub(crate) fn is_font_binary_path(path: &Path) -> bool {
-    extension(path).is_some_and(|ext| {
-        IMPORT_EXTENSIONS.contains(&ext.as_str()) || REFUSED_EXTENSIONS.contains(&ext.as_str())
-    })
+    extension(path).is_some_and(|ext| IMPORT_EXTENSIONS.contains(&ext.as_str()))
 }
 
 /// True for a binary format that can be opened but not written. `.ttf` is written by the
 /// TrueType exporter, so it is not in this list.
 pub(crate) fn is_read_only_path(path: &Path) -> bool {
-    extension(path).is_some_and(|ext| {
-        ext != "ttf"
-            && (IMPORT_EXTENSIONS.contains(&ext.as_str())
-                || REFUSED_EXTENSIONS.contains(&ext.as_str()))
-    })
+    extension(path).is_some_and(|ext| ext != "ttf" && IMPORT_EXTENSIONS.contains(&ext.as_str()))
 }
 
 pub(crate) fn load_font_binary(path: &Path) -> Result<Font, FoundryError> {
@@ -81,8 +76,10 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
         font.style.name = style.unwrap_or_else(|| "Regular".to_string());
     }
     font.style.weight = face.weight().to_number().clamp(1, 1000);
+    font.style.width = face.width().to_number().clamp(1, 9);
     font.style.italic = face.is_italic();
     font.style.italic_angle = f64::from(face.italic_angle());
+    apply_binary_info(&mut font, &face);
     font.metrics.ascender = f64::from(face.ascender());
     font.metrics.descender = f64::from(face.descender());
     if let Some(cap_height) = face.capital_height().filter(|value| *value > 0) {
@@ -122,17 +119,155 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
         glyphs.push(glyph);
     }
     font.glyphs = glyphs;
+    import_kern(&face, &mut font);
+    import_ligatures(&face, &mut font);
     Ok(font)
 }
 
-/// Bytes `ttf-parser` can read. WOFF 1 is rebuilt into an sfnt. Anything else is returned as-is,
-/// except WOFF2, which is refused.
+fn apply_binary_info(font: &mut Font, face: &Face<'_>) {
+    let lookup = |id: u16| name_text(face, id);
+    if let Some(text) = lookup(name_id::COPYRIGHT_NOTICE) {
+        font.info.copyright = text;
+    }
+    if let Some(text) = lookup(name_id::UNIQUE_ID) {
+        font.info.unique_id = text;
+    }
+    if let Some(text) = lookup(name_id::VERSION) {
+        font.info.version = text;
+    }
+    if let Some(text) = lookup(name_id::DESIGNER) {
+        font.info.designer = text;
+    }
+    if let Some(text) = lookup(name_id::LICENSE) {
+        font.info.license = text;
+    }
+    if let Some(text) = lookup(name_id::LICENSE_URL) {
+        font.info.license_url = text;
+    }
+    if let Some(os2) = face.raw_face().table(Tag::from_bytes(b"OS/2"))
+        && os2.len() >= 62
+    {
+        let vendor = &os2[58..62];
+        if vendor.iter().all(|byte| byte.is_ascii()) {
+            let text = String::from_utf8_lossy(vendor).trim().to_string();
+            if !text.is_empty() {
+                font.info.vendor = text;
+            }
+        }
+    }
+}
+
+fn name_text(face: &Face<'_>, id: u16) -> Option<String> {
+    let read = |english_only: bool| {
+        face.names()
+            .into_iter()
+            .filter(|name| name.name_id == id && name.is_unicode())
+            .filter(|name| !english_only || name.language_id == ENGLISH_US)
+            .find_map(|name| name.to_string())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    read(true).or_else(|| read(false))
+}
+
+fn import_kern(face: &Face<'_>, font: &mut Font) {
+    let Some(table) = face.tables().kern else {
+        return;
+    };
+    let mut pairs = Vec::new();
+    for subtable in table.subtables {
+        if !subtable.horizontal {
+            continue;
+        }
+        let ttf_parser::kern::Format::Format0(format) = subtable.format else {
+            continue;
+        };
+        for pair in format.pairs {
+            let left = usize::from(pair.left().0);
+            let right = usize::from(pair.right().0);
+            let Some(left_name) = font.glyphs.get(left).map(|glyph| glyph.name.clone()) else {
+                continue;
+            };
+            let Some(right_name) = font.glyphs.get(right).map(|glyph| glyph.name.clone()) else {
+                continue;
+            };
+            let value = f64::from(pair.value);
+            if value == 0.0 {
+                continue;
+            }
+            pairs.push(KernPair {
+                left: left_name,
+                right: right_name,
+                value,
+            });
+        }
+    }
+    if pairs.is_empty() {
+        return;
+    }
+    let kerning = font.kerning.get_or_insert_with(Kerning::default);
+    kerning.pairs = pairs;
+}
+
+fn import_ligatures(face: &Face<'_>, font: &mut Font) {
+    let Some(gsub) = face.tables().gsub else {
+        return;
+    };
+    let mut ligatures = Vec::new();
+    for lookup in gsub.lookups {
+        for subtable in lookup
+            .subtables
+            .into_iter::<ttf_parser::gsub::SubstitutionSubtable>()
+        {
+            let ttf_parser::gsub::SubstitutionSubtable::Ligature(liga) = subtable else {
+                continue;
+            };
+            for (index, glyph) in font.glyphs.iter().enumerate() {
+                let Some(coverage) = liga.coverage.get(GlyphId(index as u16)) else {
+                    continue;
+                };
+                let Some(set) = liga.ligature_sets.get(coverage) else {
+                    continue;
+                };
+                let mut slot = 0u16;
+                while let Some(lig) = set.get(slot) {
+                    slot += 1;
+                    let mut names = vec![glyph.name.clone()];
+                    let mut complete = true;
+                    for component in lig.components {
+                        match font.glyphs.get(usize::from(component.0)) {
+                            Some(component_glyph) => names.push(component_glyph.name.clone()),
+                            None => complete = false,
+                        }
+                    }
+                    let Some(target) = font.glyphs.get(usize::from(lig.glyph.0)) else {
+                        continue;
+                    };
+                    if complete && names.len() >= 2 {
+                        ligatures.push(Ligature {
+                            glyphs: names,
+                            name: target.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if ligatures.is_empty() {
+        return;
+    }
+    let kerning = font.kerning.get_or_insert_with(Kerning::default);
+    kerning.ligatures = ligatures;
+}
+
+/// Bytes `ttf-parser` can read. WOFF 1 and WOFF2 are unpacked into an sfnt. Anything else is
+/// returned as-is.
 pub(crate) fn sfnt_bytes(bytes: &[u8]) -> Result<Cow<'_, [u8]>, String> {
     match bytes.get(..4) {
         Some(b"wOFF") => Ok(Cow::Owned(unpack_woff(bytes)?)),
-        Some(b"wOF2") => {
-            Err("WOFF2 is not imported yet; convert it to .ttf or .otf first".to_string())
-        }
+        Some(b"wOF2") => wuff::decompress_woff2(bytes)
+            .map(Cow::Owned)
+            .map_err(|err| format!("WOFF2 could not be unpacked: {err}")),
         _ => Ok(Cow::Borrowed(bytes)),
     }
 }
@@ -896,12 +1031,37 @@ mod tests {
     }
 
     #[test]
-    fn woff_and_garbage_are_refused_by_name() {
+    fn a_woff2_opens_the_same_outlines_as_its_sfnt() {
+        let dir = temp_dir();
+        let ttf_path = dir.join("Round.ttf");
+        face("Round", 0.0, 400.0).save(&ttf_path).unwrap();
+        let ttf = fs::read(&ttf_path).unwrap();
+        let woff2 = ttf2woff2::encode(&ttf, ttf2woff2::BrotliQuality::default()).unwrap();
+        assert_eq!(&woff2[..4], b"wOF2");
+        let woff2_path = dir.join("Round.woff2");
+        fs::write(&woff2_path, &woff2).unwrap();
+
+        let from_ttf = Font::load(&ttf_path).unwrap();
+        let from_woff2 = Font::load(&woff2_path).unwrap();
+        assert_eq!(from_woff2.name, from_ttf.name);
+        assert_eq!(from_woff2.upm, from_ttf.upm);
+        assert_eq!(from_woff2.metrics, from_ttf.metrics);
+        assert_eq!(from_woff2.glyphs, from_ttf.glyphs);
+
+        let refused = from_woff2.save(&dir.join("Copy.woff2")).unwrap_err();
+        assert!(refused.to_string().contains("not written"), "{refused}");
+        assert!(!dir.join("Copy.woff2").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_broken_woff2_and_garbage_are_named() {
         let dir = temp_dir();
         let woff = dir.join("Web.woff2");
         fs::write(&woff, b"wOF2\0\x01\0\0rest").unwrap();
         let err = Font::load(&woff).unwrap_err().to_string();
-        assert!(err.contains("WOFF2 is not imported"), "{err}");
+        assert!(err.contains("WOFF2 could not be unpacked"), "{err}");
         assert!(err.contains("Web.woff2"), "{err}");
 
         let junk = dir.join("Junk.ttf");

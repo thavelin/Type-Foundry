@@ -13,5 +13,11 @@ norad = "0.18"
 serde.workspace = true
 serde_json.workspace = true
 ttf-parser = "0.25"
+# Pure Rust WOFF2 unpacking. The output is an sfnt that the TrueType and CFF readers already take.
+wuff = "0.2"
 # Path outlines only. Text and system fonts stay off.
 usvg = { version = "0.45", default-features = false }
+
+[dev-dependencies]
+# Pure Rust WOFF2 writer, used only to build test files.
+ttf2woff2 = "0.13"
