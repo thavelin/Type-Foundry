@@ -32,11 +32,11 @@ Every change goes through a session command (`move_points`, `split_segment`, `ad
 
 A path given on the command line opens on launch: `typefoundry C:/fonts/Wide.ufo`.
 
-On first launch on Windows the window adds `Type Foundry` to the Start menu, pointing at `C:\Users\Troy Havelin\AppData\Local\typefoundry-target\release\typefoundry.exe`. It skips that when the shortcut already exists.
+On first launch on Windows the window adds `Type Foundry` to the Start menu, pointing at the running executable. It skips that when the shortcut already exists.
 
 ## Chrome
 
-Chrome follows the Havelin v2 system surface used by Frame Extractor. Only these colors are used:
+Chrome uses the following palette:
 
 | Token | Hex | Use |
 | --- | --- | --- |
