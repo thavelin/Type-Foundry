@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+use crate::preview::ReviewView;
+
 /// How many files File > Open recent keeps.
 pub const RECENT_LIMIT: usize = 10;
 
@@ -38,6 +40,8 @@ pub struct Settings {
     /// Fraction of the main area given to the overview when split.
     pub split_ratio: f32,
     pub review_place: ReviewPlace,
+    /// The review pane's set, size, and guides.
+    pub review: ReviewView,
 }
 
 /// Where the review sheet sits. A window can be moved and resized on its own.
@@ -70,6 +74,7 @@ impl Default for Settings {
             split_main: false,
             split_ratio: 0.42,
             review_place: ReviewPlace::Bottom,
+            review: ReviewView::default(),
             recent: Vec::new(),
         }
     }
@@ -99,9 +104,9 @@ impl Settings {
         ui.add(egui::Slider::new(&mut self.cell_size, 48.0..=200.0).text("Cell size"));
         ui.add_space(8.0);
         ui.heading("Panels");
-        ui.checkbox(&mut self.glyph_list_in_overview, "Glyph list in Overview")
+        ui.checkbox(&mut self.glyph_list_in_overview, "Glyph tree in Overview")
             .on_hover_text(
-                "Force the glyph list on in Overview too. Editor and Split show it either way.",
+                "Force the glyph tree on in Overview too. Editor, Review, and Split show it either way.",
             );
         ui.checkbox(&mut self.show_inspector, "Inspector");
         ui.checkbox(&mut self.show_preview, "Review sheet");

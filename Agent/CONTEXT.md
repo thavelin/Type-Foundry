@@ -64,6 +64,14 @@ Frozen for now:
 
 ## Session log
 
+### 2026-10-07 — Integrate Updated-UI with gentle pyramid
+
+- Focus: merge Troy's `Updated-UI` on `main` (glyph tree, Review pane as its own mode, `GlyphGroup` / `index.group`) into the pyramid chrome branch without losing either side.
+- Kept from Updated-UI: left glyph tree (fonts → groups → glyphs), `Mode::Review` + Ctrl+3, Review toolbar icon, docked review steps aside, Split right-side Editor/Review pairing, preview overlays and character sets.
+- Kept from pyramid: How chrome thinks, icon-only toolbar (including Review), progressive inspector, mode-aware tree visibility (`glyph_list_in_overview` override; tree on in Editor/Review/Split).
+- Validation: workspace check after merge conflict resolution.
+- Git: branch `cursor/gentle-pyramid-ux-0dfd` merged `origin/main` @ `412f2f4`.
+
 ### 2026-10-07 — Gentle pyramid UX (chrome first pass)
 
 - Focus: doctrine + foundry-app chrome wiring from the Gentle pyramid UX plan. Capability surface unchanged.

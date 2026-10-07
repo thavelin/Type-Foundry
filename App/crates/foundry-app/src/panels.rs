@@ -1,16 +1,17 @@
 //! The glyph list and the inspector. Every field change is a command.
 
 use eframe::egui;
+use foundry_api::GlyphGroup;
 use serde_json::{Value, json};
 
-use crate::app::{FoundryWindow, Mode, Scope, parse_unicode};
+use crate::app::{FoundryWindow, GlyphEntry, Mode, Scope, parse_unicode};
 
 impl FoundryWindow {
+    /// The glyph tree: each open font, then its glyphs in groups such as Uppercase and Figures.
+    /// The active font opens by default. Clicking a glyph in another font switches to that font.
     pub fn glyph_list(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.weak(format!("Glyphs · {}", self.glyphs.len()));
-        });
+        ui.weak(format!("Fonts · {}", self.tabs.len()));
         ui.add(
             egui::TextEdit::singleline(&mut self.filter)
                 .hint_text("Filter")
@@ -18,52 +19,106 @@ impl FoundryWindow {
         );
         ui.add_space(4.0);
         let filter = self.filter.trim().to_lowercase();
-        let rows: Vec<(String, Option<u32>)> = self
-            .glyphs
+        let filtering = !filter.is_empty();
+
+        // Read every font's glyphs before drawing, so the tree can hold them while it draws.
+        let heads: Vec<(u32, String, bool)> = self
+            .tabs
             .iter()
-            .filter(|entry| {
-                filter.is_empty()
-                    || entry.name.to_lowercase().contains(&filter)
-                    || entry
-                        .unicode
-                        .and_then(char::from_u32)
-                        .is_some_and(|c| c.to_lowercase().to_string() == filter)
-            })
-            .map(|entry| (entry.name.clone(), entry.unicode))
+            .map(|tab| (tab.id, format!("{} · {}", tab.family, tab.style), tab.dirty))
             .collect();
-        let mut chosen = None;
+        let fonts: Vec<(u32, String, bool, Vec<GlyphEntry>)> = heads
+            .into_iter()
+            .map(|(id, title, dirty)| (id, title, dirty, self.font_glyphs_of(id)))
+            .collect();
+
+        let active = self.active;
+        let current = self.current.clone();
+        let mut pick = None;
         let mut open = None;
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            row_height,
-            rows.len(),
-            |ui, range| {
-                for (name, unicode) in &rows[range] {
-                    let selected = self.current.as_deref() == Some(name.as_str());
-                    let label = match unicode
-                        .and_then(char::from_u32)
-                        .filter(|c| !c.is_control() && *name != c.to_string())
-                    {
-                        Some(c) => format!("{c}   {name}"),
-                        None => format!("     {name}"),
-                    };
-                    let response = ui.selectable_label(selected, label);
-                    if response.clicked() {
-                        chosen = Some(name.clone());
+        let mut any = false;
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for (id, title, dirty, glyphs) in &fonts {
+                    let members: Vec<&GlyphEntry> = glyphs
+                        .iter()
+                        .filter(|entry| glyph_matches(&filter, entry))
+                        .collect();
+                    if filtering && members.is_empty() {
+                        continue;
                     }
-                    if response.double_clicked() {
-                        open = Some(name.clone());
-                    }
+                    any = true;
+                    let is_active = Some(*id) == active;
+                    let heading = format!(
+                        "{title}  {}{}",
+                        glyphs.len(),
+                        if *dirty { "  •" } else { "" }
+                    );
+                    egui::CollapsingHeader::new(heading)
+                        .id_salt(("font", *id))
+                        .default_open(is_active)
+                        .open(filtering.then_some(true))
+                        .show(ui, |ui| {
+                            for group in GlyphGroup::ALL {
+                                let rows: Vec<&GlyphEntry> = members
+                                    .iter()
+                                    .copied()
+                                    .filter(|entry| entry.group == group)
+                                    .collect();
+                                if rows.is_empty() {
+                                    continue;
+                                }
+                                let letters = matches!(
+                                    group,
+                                    GlyphGroup::Uppercase
+                                        | GlyphGroup::Lowercase
+                                        | GlyphGroup::Figures
+                                );
+                                egui::CollapsingHeader::new(format!(
+                                    "{}  {}",
+                                    group.label(),
+                                    rows.len()
+                                ))
+                                .id_salt(("group", *id, group.label()))
+                                .default_open(letters)
+                                .open(filtering.then_some(true))
+                                .show(ui, |ui| {
+                                    for entry in rows {
+                                        let selected = is_active
+                                            && current.as_deref() == Some(entry.name.as_str());
+                                        let response =
+                                            ui.selectable_label(selected, glyph_label(entry));
+                                        if response.clicked() {
+                                            pick = Some((*id, entry.name.clone()));
+                                        }
+                                        if response.double_clicked() {
+                                            open = Some((*id, entry.name.clone()));
+                                        }
+                                    }
+                                });
+                            }
+                        });
                 }
-            },
-        );
-        if let Some(name) = chosen {
-            self.select_glyph(Some(name));
+                if filtering && !any {
+                    ui.weak("No glyphs match.");
+                }
+            });
+        if let Some((id, name)) = pick {
+            self.reach_glyph(id, name);
         }
-        if let Some(name) = open {
+        if let Some((id, name)) = open {
+            self.reach_glyph(id, name.clone());
             self.open_editor(name);
         }
+    }
+
+    /// Makes `name` in font `id` the selected glyph, switching fonts first when needed.
+    fn reach_glyph(&mut self, id: u32, name: String) {
+        if Some(id) != self.active {
+            self.switch_to(id);
+        }
+        self.select_glyph(Some(name));
     }
 
     pub fn inspector(&mut self, ui: &mut egui::Ui) {
@@ -359,4 +414,26 @@ impl FoundryWindow {
             }
         });
     }
+}
+
+/// The row text: the character when the glyph has one, then the glyph name.
+fn glyph_label(entry: &GlyphEntry) -> String {
+    match entry
+        .unicode
+        .and_then(char::from_u32)
+        .filter(|c| !c.is_control() && entry.name != c.to_string())
+    {
+        Some(c) => format!("{c}   {}", entry.name),
+        None => format!("     {}", entry.name),
+    }
+}
+
+/// `filter` is already trimmed and lowercased. A one-character filter also matches that character.
+fn glyph_matches(filter: &str, entry: &GlyphEntry) -> bool {
+    filter.is_empty()
+        || entry.name.to_lowercase().contains(filter)
+        || entry
+            .unicode
+            .and_then(char::from_u32)
+            .is_some_and(|c| c.to_lowercase().to_string() == filter)
 }

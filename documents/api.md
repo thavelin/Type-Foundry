@@ -109,7 +109,7 @@ These commands change the open font. Each one checks its input before it changes
 
 The first line slants every glyph 12 degrees, the way the window's Slant effect does. `round_coordinates` rounds points and advances to whole units, for the named glyphs or all of them.
 
-`index` lists every glyph's name, Unicode, advance, contour count, and point count in one response.
+`index` lists every glyph's name, Unicode, group, advance, contour count, and point count in one response. `group` is one of `Uppercase`, `Lowercase`, `Figures`, `Punctuation`, `Symbols`, `Spaces`, `Marks`, `Ligatures`, or `Unencoded`. A ligature listed in the kerning block is `Ligatures`. A glyph with no Unicode value is `Unencoded`. The group is worked out from the name and Unicode value on each read and is not stored in the font.
 
 ### Undo
 
