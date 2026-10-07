@@ -254,9 +254,7 @@ impl FoundryWindow {
         if !self.has_font() {
             return false;
         }
-        self.settings.show_glyph_list
-            || self.settings.split_main
-            || self.mode == Mode::Editor
+        self.settings.show_glyph_list || self.settings.split_main || self.mode == Mode::Editor
     }
 
     /// Pyramid focus for the inspector. Reapplied only when the bucket changes.
