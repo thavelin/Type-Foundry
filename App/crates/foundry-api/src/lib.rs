@@ -3,10 +3,12 @@
 use std::path::Path;
 
 use foundry_core::{
-    Anchor, Contour, Corner, ExportFormat, Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix,
-    MetricsUpdate, OffsetOptions, PointKind, ProofOptions, Side, StrokeKind, StyleUpdate,
-    blend_fonts, check_family, check_outlines, check_spacing, classify, compatibility, copy_family,
-    diff_fonts, export_family, load_family, offset_font, save_family, stroke_font, write_proof,
+    Anchor, Contour, Corner, DesignDecision, ExportFormat, Font, FoundryError, Glyph, InfoUpdate,
+    Kerning, Matrix, MetricsUpdate, OffsetOptions, PointKind, ProofOptions, Side, StrokeKind,
+    StyleUpdate, audit_font, blend_fonts, capture_genome, check_family, check_genome,
+    check_outlines, check_spacing, classify, compatibility, copy_family, diff_fonts, export_family,
+    list_decisions, load_family, measure_font, offset_font, record_decision, save_family,
+    stroke_font, write_proof,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -360,6 +362,43 @@ pub enum Command {
         #[serde(default)]
         names: Option<Vec<String>>,
     },
+    /// Live Style Genome measurements for the active font (read-only).
+    Measure,
+    /// Compute and store a Style Genome on `font.lib`.
+    CaptureGenome {
+        /// Absolute units allowed from the median stem before `check_genome` warns.
+        #[serde(default = "default_stem_tolerance")]
+        stem_tolerance: f64,
+    },
+    /// Compare live stems to the captured genome (read-only).
+    CheckGenome,
+    /// Technical outline/spacing checks plus design genome deviations (read-only).
+    Audit {
+        #[serde(default)]
+        min_gap: f64,
+    },
+    /// Append a DesignDecision to `font.lib`.
+    RecordDecision {
+        #[serde(default)]
+        scope: String,
+        #[serde(default)]
+        glyphs: Vec<String>,
+        #[serde(default)]
+        issue: String,
+        #[serde(default)]
+        observation: String,
+        #[serde(default)]
+        intervention: String,
+        accepted: bool,
+        #[serde(default)]
+        confidence: f64,
+    },
+    /// List DesignDecisions stored on the active font (read-only).
+    ListDecisions,
+}
+
+fn default_stem_tolerance() -> f64 {
+    4.0
 }
 
 fn default_upm() -> u16 {
@@ -434,7 +473,9 @@ impl Command {
             | Self::SetSidebearing { .. }
             | Self::MoveGlyph { .. }
             | Self::Slant { .. }
-            | Self::ScaleWidth { .. } => true,
+            | Self::ScaleWidth { .. }
+            | Self::CaptureGenome { .. }
+            | Self::RecordDecision { .. } => true,
             _ => false,
         }
     }
@@ -1283,6 +1324,59 @@ impl Session {
                 let issues = check_spacing(font, min_gap, pairs.as_deref())?;
                 Ok(Some(json!({ "issues": issues, "count": issues.len() })))
             }
+            Command::Measure => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                Ok(Some(measure_font(font)))
+            }
+            Command::CaptureGenome { stem_tolerance } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                let genome = capture_genome(font, stem_tolerance)?;
+                Ok(Some(
+                    serde_json::to_value(genome)
+                        .map_err(|err| FoundryError::Json(err.to_string()))?,
+                ))
+            }
+            Command::CheckGenome => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let issues = check_genome(font)?;
+                Ok(Some(json!({ "issues": issues, "count": issues.len() })))
+            }
+            Command::Audit { min_gap } => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                Ok(Some(audit_font(font, min_gap)?))
+            }
+            Command::RecordDecision {
+                scope,
+                glyphs,
+                issue,
+                observation,
+                intervention,
+                accepted,
+                confidence,
+            } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                let count = record_decision(
+                    font,
+                    DesignDecision {
+                        scope,
+                        glyphs,
+                        issue,
+                        observation,
+                        intervention,
+                        accepted,
+                        confidence,
+                    },
+                )?;
+                Ok(Some(json!({ "count": count })))
+            }
+            Command::ListDecisions => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let decisions = list_decisions(font)?;
+                Ok(Some(json!({
+                    "decisions": decisions,
+                    "count": decisions.len(),
+                })))
+            }
             Command::Diff { a, b } => {
                 let before = Font::load(Path::new(&a))?;
                 let after = Font::load(Path::new(&b))?;
@@ -2057,5 +2151,91 @@ mod tests {
         assert!((session.font().unwrap().glyph("f").unwrap().advance - 172.0).abs() < 0.01);
         assert!(line(&mut session, r#"{"op":"undo"}"#).ok);
         assert!((session.font().unwrap().glyph("f").unwrap().advance - 300.0).abs() < 0.01);
+    }
+
+    fn two_stem_h() -> Glyph {
+        Glyph {
+            name: "H".into(),
+            unicode: Some(0x48),
+            advance: 120.0,
+            contours: vec![
+                Contour {
+                    closed: true,
+                    points: vec![
+                        point(0.0, 0.0),
+                        point(20.0, 0.0),
+                        point(20.0, 100.0),
+                        point(0.0, 100.0),
+                    ],
+                },
+                Contour {
+                    closed: true,
+                    points: vec![
+                        point(80.0, 0.0),
+                        point(100.0, 0.0),
+                        point(100.0, 100.0),
+                        point(80.0, 100.0),
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn measure_capture_audit_and_decisions() {
+        let mut session = Session::new();
+        assert!(
+            session
+                .execute(Command::Create {
+                    name: "Genome".into(),
+                    upm: 1000,
+                })
+                .ok
+        );
+        assert!(
+            session
+                .execute(Command::PutGlyph {
+                    glyph: two_stem_h(),
+                })
+                .ok
+        );
+
+        let measured = session.execute(Command::Measure);
+        assert!(measured.ok, "{measured:?}");
+        let data = measured.data.unwrap();
+        assert_eq!(data["primary_stem"], json!(20.0));
+
+        let captured = session.execute(Command::CaptureGenome {
+            stem_tolerance: 2.0,
+        });
+        assert!(captured.ok, "{captured:?}");
+        assert_eq!(captured.data.unwrap()["primary_stem"], json!(20.0));
+        assert!(
+            session
+                .font()
+                .unwrap()
+                .lib
+                .contains_key("com.typefoundry.styleGenome")
+        );
+
+        let audited = session.execute(Command::Audit { min_gap: 0.0 });
+        assert!(audited.ok, "{audited:?}");
+        assert_eq!(audited.data.unwrap()["design"]["count"], json!(0));
+
+        let recorded = session.execute(Command::RecordDecision {
+            scope: "Genome".into(),
+            glyphs: vec!["H".into()],
+            issue: "stem".into(),
+            observation: "feels right".into(),
+            intervention: "keep".into(),
+            accepted: true,
+            confidence: 0.8,
+        });
+        assert!(recorded.ok, "{recorded:?}");
+        assert_eq!(recorded.data.unwrap()["count"], json!(1));
+
+        let listed = session.execute(Command::ListDecisions);
+        assert!(listed.ok, "{listed:?}");
+        assert_eq!(listed.data.unwrap()["count"], json!(1));
     }
 }

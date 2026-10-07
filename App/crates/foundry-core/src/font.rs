@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::FoundryError;
 
@@ -247,6 +248,11 @@ pub struct Font {
     /// Feature-file text. `None` means a UFO save keeps `features.fea` already on disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<String>,
+    /// Open bag for Style Genome, DesignDecisions, and other foundry data. Unknown keys from
+    /// older loaders are kept on round-trip once this field exists; keys we do not know yet
+    /// still survive because they live in this map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lib: BTreeMap<String, Value>,
     pub glyphs: Vec<Glyph>,
 }
 
@@ -280,6 +286,7 @@ impl Font {
             info: FontInfo::default(),
             kerning: None,
             features: None,
+            lib: BTreeMap::new(),
             glyphs: Vec::new(),
         })
     }
