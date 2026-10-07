@@ -60,8 +60,18 @@ Frozen for now:
 - Toolbar icons are the Gravity UI set (MIT, Yandex), vendored as SVG. The window draws them locally and does not fetch them.
 - The window, the executable, and the existing Start menu shortcut use Troy's mark at `App/crates/foundry-app/assets/type-foundry-icon.png`.
 - Cargo target directory stays on `C:`.
+- Progressive-disclosure chrome (Illustrator menus + Figma restraint): menus stay the complete atlas; toolbar and panels shortcut the current pyramid level. No second UI framework or design-system crate.
 
 ## Session log
+
+### 2026-10-07 — Gentle pyramid UX (chrome first pass)
+
+- Focus: doctrine + foundry-app chrome wiring from the Gentle pyramid UX plan. Capability surface unchanged.
+- Design: `Design/README.md` gains **How chrome thinks** and updated window defaults (mode-aware glyph list, progressive inspector, icon-only toolbar).
+- Window: glyph list defaults off in Overview-only (Editor/Split/override keep it); inspector open-state follows mode and selection; toolbar tools and modes are icon-only with hover labels; menus stay complete.
+- Soft de-duplication only: tab-row Make italic / New style kept; no menu deletions.
+- Validation: workspace check + Xvfb smoke of Overview → Editor → Selection.
+- Git: branch `cursor/gentle-pyramid-ux-0dfd`.
 
 ### 2026-10-06 — Components, WOFF2, offset arcs, PDF proof, Open recent
 

@@ -87,7 +87,8 @@ pub fn rasterize(svg: &[u8]) -> Option<ColorImage> {
 }
 
 impl FoundryWindow {
-    /// A tool button: Gravity UI icon, then the name. Longer help shows on hover.
+    /// A tool button: Gravity UI icon, optional name. Longer help shows on hover.
+    /// Pass an empty `label` for an icon-only toolbar control (hover keeps the name).
     pub fn icon_button(
         &mut self,
         ui: &mut egui::Ui,
@@ -99,9 +100,14 @@ impl FoundryWindow {
     ) -> bool {
         let texture = self.icons.texture(ui.ctx(), name);
         let image = egui::Image::from_texture(&texture).fit_to_exact_size(Vec2::splat(16.0));
+        let button = if label.is_empty() {
+            egui::Button::image(image)
+        } else {
+            egui::Button::image_and_text(image, label)
+        };
         ui.add_enabled(
             enabled,
-            egui::Button::image_and_text(image, label)
+            button
                 .selected(selected)
                 .frame(true)
                 .frame_when_inactive(selected)

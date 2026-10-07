@@ -59,7 +59,8 @@ impl Default for Settings {
             coordinates: true,
             snap: true,
             cell_size: 96.0,
-            show_glyph_list: true,
+            // Override: force the list on even in Overview. When false, Editor/Split still show it.
+            show_glyph_list: false,
             show_inspector: true,
             show_preview: true,
             onion_skin: false,
@@ -97,7 +98,10 @@ impl Settings {
         ui.add(egui::Slider::new(&mut self.cell_size, 48.0..=200.0).text("Cell size"));
         ui.add_space(8.0);
         ui.heading("Panels");
-        ui.checkbox(&mut self.show_glyph_list, "Glyph list");
+        ui.checkbox(&mut self.show_glyph_list, "Glyph list in Overview")
+            .on_hover_text(
+                "Force the glyph list on in Overview too. Editor and Split show it either way.",
+            );
         ui.checkbox(&mut self.show_inspector, "Inspector");
         ui.checkbox(&mut self.show_preview, "Review sheet");
         ui.horizontal(|ui| {
@@ -137,6 +141,13 @@ mod tests {
         assert!(!settings.dark_canvas);
         assert!(settings.show_guides);
         assert!(settings.recent.is_empty());
+        // Missing key uses the pyramid default: Overview does not force the list on.
+        assert!(!settings.show_glyph_list);
+    }
+
+    #[test]
+    fn glyph_list_override_defaults_off() {
+        assert!(!Settings::default().show_glyph_list);
     }
 
     #[test]
