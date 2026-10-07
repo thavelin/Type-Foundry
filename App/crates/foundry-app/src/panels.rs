@@ -2,9 +2,11 @@
 
 use eframe::egui;
 use foundry_api::GlyphGroup;
+use foundry_app::palette::{ALERT, AMBER, MUTED, SIGNAL};
 use serde_json::{Value, json};
 
 use crate::app::{FoundryWindow, GlyphEntry, Mode, Scope, parse_unicode};
+use crate::color;
 
 impl FoundryWindow {
     /// The glyph tree: each open font, then its glyphs in groups such as Uppercase and Figures.
@@ -127,6 +129,7 @@ impl FoundryWindow {
         let style_open = force.then_some(self.inspector_style_open);
         let glyph_open = force.then_some(self.inspector_glyph_open);
         let selection_open = force.then_some(self.inspector_selection_open);
+        let genome_open = force.then_some(self.inspector_genome_open);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -136,6 +139,11 @@ impl FoundryWindow {
                 egui::CollapsingHeader::new("Style")
                     .open(style_open)
                     .show(ui, |ui| self.style_section(ui));
+                if self.has_font() {
+                    egui::CollapsingHeader::new("Genome")
+                        .open(genome_open)
+                        .show(ui, |ui| self.genome_section(ui));
+                }
                 if self.current.is_some() {
                     egui::CollapsingHeader::new("Glyph")
                         .open(glyph_open)
@@ -150,6 +158,87 @@ impl FoundryWindow {
                 }
             });
         self.inspector_apply_open = false;
+    }
+
+    fn genome_section(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("genome_fields")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Stem tolerance");
+                ui.add(
+                    egui::DragValue::new(&mut self.genome_stem_tolerance)
+                        .speed(0.5)
+                        .range(0.0..=64.0),
+                )
+                .on_hover_text("Absolute units allowed from the median stem when capturing.");
+                ui.end_row();
+                if let Some(data) = &self.genome_snapshot {
+                    if let Some(stem) = data["primary_stem"].as_f64() {
+                        ui.label("Primary stem");
+                        ui.label(format!("{stem:.1}"));
+                        ui.end_row();
+                    }
+                    if let Some(side) = data["median_sidebearing"].as_f64() {
+                        ui.label("Median sidebearing");
+                        ui.label(format!("{side:.1}"));
+                        ui.end_row();
+                    }
+                    if let Some(tol) = data["stem_tolerance"].as_f64() {
+                        ui.label("Captured tolerance");
+                        ui.label(format!("{tol:.1}"));
+                        ui.end_row();
+                    }
+                    if let Some(samples) = data["samples"].as_array() {
+                        let names: Vec<&str> = samples.iter().filter_map(Value::as_str).collect();
+                        if !names.is_empty() {
+                            ui.label("Samples");
+                            ui.label(names.join(", "));
+                            ui.end_row();
+                        }
+                    }
+                } else {
+                    ui.label("Genome");
+                    ui.colored_label(color(MUTED), "Not measured yet");
+                    ui.end_row();
+                }
+            });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Measure")
+                .on_hover_text("Live stems and sidebearings (measure)")
+                .clicked()
+            {
+                self.measure_genome();
+            }
+            if ui
+                .button("Capture")
+                .on_hover_text("Store Style Genome on the font")
+                .clicked()
+            {
+                self.capture_genome();
+            }
+            if ui
+                .button("Check")
+                .on_hover_text("Compare live stems to the captured genome")
+                .clicked()
+            {
+                self.check_genome();
+            }
+            if ui
+                .button("Audit")
+                .on_hover_text("Technical outline/spacing plus design genome issues")
+                .clicked()
+            {
+                self.run_audit();
+            }
+        });
+        if let Some(report) = self.audit_report.clone() {
+            ui.add_space(6.0);
+            ui.separator();
+            genome_audit_body(ui, &report);
+        }
     }
 
     fn font_section(&mut self, ui: &mut egui::Ui) {
@@ -414,6 +503,73 @@ impl FoundryWindow {
             }
         });
     }
+}
+
+/// Show Foundry Audit / genome-check results under the Genome inspector actions.
+fn genome_audit_body(ui: &mut egui::Ui, report: &Value) {
+    let technical_count = report["technical"]["count"].as_u64().unwrap_or(0);
+    let design_count = report["design"]["count"]
+        .as_u64()
+        .or_else(|| report["count"].as_u64())
+        .unwrap_or(0);
+    let total = report["count"]
+        .as_u64()
+        .unwrap_or(technical_count + design_count);
+    if total == 0 {
+        ui.colored_label(color(SIGNAL), "Audit clean — no technical or design issues.");
+        return;
+    }
+    ui.colored_label(
+        color(AMBER),
+        format!("{total} issue(s) · tech {technical_count} · design {design_count}"),
+    );
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .show(ui, |ui| {
+            if let Some(outlines) = report["technical"]["outlines"].as_array() {
+                for issue in outlines {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            color(ALERT),
+                            issue["code"].as_str().unwrap_or("outline"),
+                        );
+                        if let Some(glyph) = issue["glyph"].as_str() {
+                            ui.strong(glyph);
+                        }
+                        ui.label(issue["detail"].as_str().unwrap_or_default());
+                    });
+                }
+            }
+            if let Some(spacing) = report["technical"]["spacing"].as_array() {
+                for issue in spacing {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            color(AMBER),
+                            issue["code"].as_str().unwrap_or("spacing"),
+                        );
+                        ui.label(issue["detail"].as_str().unwrap_or_default());
+                    });
+                }
+            }
+            let design = report["design"]["issues"]
+                .as_array()
+                .or_else(|| report["issues"].as_array());
+            if let Some(issues) = design {
+                for issue in issues {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            color(AMBER),
+                            issue["code"].as_str().unwrap_or("design"),
+                        );
+                        if let Some(glyph) = issue["glyph"].as_str() {
+                            ui.strong(glyph);
+                        }
+                        ui.label(issue["detail"].as_str().unwrap_or_default());
+                    });
+                }
+            }
+        });
 }
 
 /// The row text: the character when the glyph has one, then the glyph name.
