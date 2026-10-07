@@ -192,6 +192,7 @@ fn interpolate(a: &Font, b: &Font, t: f64) -> Font {
         info: a.info.clone(),
         kerning: a.kerning.clone(),
         features: a.features.clone(),
+        lib: a.lib.clone(),
         glyphs,
     }
 }

@@ -138,6 +138,12 @@ impl Server {
             "redo" => "redo",
             "width_scale" => "scale_width",
             "slant" => "slant",
+            "font_measure" => "measure",
+            "genome_capture" => "capture_genome",
+            "genome_check" => "check_genome",
+            "font_audit" => "audit",
+            "decision_record" => "record_decision",
+            "decision_list" => "list_decisions",
             other => return Err((INVALID_PARAMS, format!("unknown tool {other}"))),
         };
 
@@ -703,6 +709,54 @@ fn tool_list() -> Value {
                 "properties": { "degrees": { "type": "number" } },
                 "required": ["degrees"]
             }
+        },
+        {
+            "name": "font_measure",
+            "description": "Live Style Genome measurements: vertical metrics, per-glyph stems and sidebearings.",
+            "inputSchema": none
+        },
+        {
+            "name": "genome_capture",
+            "description": "Compute a Style Genome from sample glyphs and store it on the font lib. stem_tolerance is absolute units (default 4).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "stem_tolerance": { "type": "number", "default": 4 } }
+            }
+        },
+        {
+            "name": "genome_check",
+            "description": "Compare live stems to the captured Style Genome.",
+            "inputSchema": none
+        },
+        {
+            "name": "font_audit",
+            "description": "Technical outline and spacing checks plus Style Genome design deviations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "min_gap": { "type": "number", "default": 0 } }
+            }
+        },
+        {
+            "name": "decision_record",
+            "description": "Append a DesignDecision to the font lib for later learning.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string" },
+                    "glyphs": { "type": "array", "items": { "type": "string" } },
+                    "issue": { "type": "string" },
+                    "observation": { "type": "string" },
+                    "intervention": { "type": "string" },
+                    "accepted": { "type": "boolean" },
+                    "confidence": { "type": "number", "default": 0 }
+                },
+                "required": ["accepted"]
+            }
+        },
+        {
+            "name": "decision_list",
+            "description": "List DesignDecisions stored on the active font.",
+            "inputSchema": none
         }
     ]) {
         tools.extend(more);
@@ -794,7 +848,11 @@ mod tests {
         assert!(names.contains(&"path_offset"));
         assert!(names.contains(&"kern_add"));
         assert!(names.contains(&"font_proof"));
-        assert_eq!(names.len(), 38);
+        assert!(names.contains(&"font_measure"));
+        assert!(names.contains(&"genome_capture"));
+        assert!(names.contains(&"font_audit"));
+        assert!(names.contains(&"decision_record"));
+        assert_eq!(names.len(), 44);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }

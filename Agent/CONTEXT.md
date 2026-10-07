@@ -61,8 +61,17 @@ Frozen for now:
 - The window, the executable, and the existing Start menu shortcut use Troy's mark at `App/crates/foundry-app/assets/type-foundry-icon.png`.
 - Cargo target directory stays on `C:`.
 - Progressive-disclosure chrome (Illustrator menus + Figma restraint): menus stay the complete atlas; toolbar and panels shortcut the current pyramid level. No second UI framework or design-system crate.
+- Foundry Intelligence (Phase I start): fonts carry a `lib` map; Style Genome + DesignDecisions live there; `measure` / `capture_genome` / `check_genome` / `audit` / `record_decision` / `list_decisions` are session commands (and MCP tools). AI critique UI and non-destructive Element stacks stay later.
 
 ## Session log
+
+### 2026-10-07 — Foundry Intelligence first slice
+
+- Focus: Phase I of the FontLab-inspired roadmap — measurements, audit, DesignDecision recording through the command API.
+- Core: `Font.lib`, `genome.rs` (stem widths via `glyph_stem_widths`), capture/check/audit/decisions.
+- API + MCP: six new commands/tools (`font_measure`, `genome_capture`, `genome_check`, `font_audit`, `decision_record`, `decision_list`). MCP is 44 tools. Docs in `documents/api.md`.
+- Not in this slice: AI critique UI, ray-cast stems, kerning workspace, live components, GUI panels for genome.
+- Git: branch `cursor/foundry-intelligence-0dfd`.
 
 ### 2026-10-07 — Integrate Updated-UI with gentle pyramid
 

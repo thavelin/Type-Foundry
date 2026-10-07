@@ -598,6 +598,22 @@ fn ink_x(glyph: &Glyph) -> (f64, f64) {
     (min_x, max_x)
 }
 
+/// Widths of vertical stems in `glyph`, using the same near-vertical edge clustering as
+/// `scale_width`. Empty when the glyph has fewer than two stem gaps.
+pub fn glyph_stem_widths(glyph: &Glyph) -> Vec<f64> {
+    let edges = vertical_edges(glyph);
+    if edges.len() < 2 {
+        return Vec::new();
+    }
+    let mut stems = Vec::new();
+    for index in 0..edges.len() - 1 {
+        if index.is_multiple_of(2) {
+            stems.push(edges[index + 1] - edges[index]);
+        }
+    }
+    stems
+}
+
 fn vertical_edges(glyph: &Glyph) -> Vec<f64> {
     let mut xs = Vec::new();
     for contour in &glyph.contours {
