@@ -254,7 +254,9 @@ impl FoundryWindow {
         if !self.has_font() {
             return false;
         }
-        self.settings.show_glyph_list || self.settings.split_main || self.mode == Mode::Editor
+        self.settings.glyph_list_in_overview
+            || self.settings.split_main
+            || self.mode == Mode::Editor
     }
 
     /// Pyramid focus for the inspector. Reapplied only when the bucket changes.
@@ -1111,10 +1113,13 @@ impl FoundryWindow {
                     self.view = None;
                 }
                 ui.separator();
-                ui.checkbox(&mut self.settings.show_glyph_list, "Glyph list in Overview")
-                    .on_hover_text(
-                        "Force the glyph list on in Overview too. Editor and Split show it either way.",
-                    );
+                ui.checkbox(
+                    &mut self.settings.glyph_list_in_overview,
+                    "Glyph list in Overview",
+                )
+                .on_hover_text(
+                    "Force the glyph list on in Overview too. Editor and Split show it either way.",
+                );
                 ui.checkbox(&mut self.settings.show_inspector, "Inspector");
                 ui.checkbox(&mut self.settings.show_preview, "Review sheet");
                 ui.horizontal(|ui| {
@@ -1922,17 +1927,17 @@ mod tests {
         let mut window = window_with_font();
         window.mode = Mode::Overview;
         window.settings.split_main = false;
-        window.settings.show_glyph_list = false;
+        window.settings.glyph_list_in_overview = false;
         assert!(!window.glyph_list_visible());
 
-        window.settings.show_glyph_list = true;
+        window.settings.glyph_list_in_overview = true;
         assert!(window.glyph_list_visible());
     }
 
     #[test]
     fn glyph_list_shows_in_editor_and_split_without_override() {
         let mut window = window_with_font();
-        window.settings.show_glyph_list = false;
+        window.settings.glyph_list_in_overview = false;
 
         window.mode = Mode::Editor;
         window.settings.split_main = false;
