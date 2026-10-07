@@ -21,7 +21,9 @@ pub struct Settings {
     pub coordinates: bool,
     pub snap: bool,
     pub cell_size: f32,
-    pub show_glyph_list: bool,
+    /// Force the glyph list on in Overview. Editor and Split show it either way.
+    /// Renamed from `show_glyph_list` so older persisted `true` defaults do not stick.
+    pub glyph_list_in_overview: bool,
     pub show_inspector: bool,
     pub show_preview: bool,
     /// Draw the previous and next glyphs beside the one being edited, with no handles.
@@ -63,7 +65,7 @@ impl Default for Settings {
             coordinates: true,
             snap: true,
             cell_size: 96.0,
-            show_glyph_list: true,
+            glyph_list_in_overview: false,
             show_inspector: true,
             show_preview: true,
             onion_skin: false,
@@ -102,7 +104,10 @@ impl Settings {
         ui.add(egui::Slider::new(&mut self.cell_size, 48.0..=200.0).text("Cell size"));
         ui.add_space(8.0);
         ui.heading("Panels");
-        ui.checkbox(&mut self.show_glyph_list, "Glyph list");
+        ui.checkbox(&mut self.glyph_list_in_overview, "Glyph tree in Overview")
+            .on_hover_text(
+                "Force the glyph tree on in Overview too. Editor, Review, and Split show it either way.",
+            );
         ui.checkbox(&mut self.show_inspector, "Inspector");
         ui.checkbox(&mut self.show_preview, "Review sheet");
         ui.horizontal(|ui| {
@@ -142,6 +147,23 @@ mod tests {
         assert!(!settings.dark_canvas);
         assert!(settings.show_guides);
         assert!(settings.recent.is_empty());
+        // Missing key uses the pyramid default: Overview does not force the list on.
+        assert!(!settings.glyph_list_in_overview);
+    }
+
+    #[test]
+    fn glyph_list_override_defaults_off() {
+        assert!(!Settings::default().glyph_list_in_overview);
+    }
+
+    #[test]
+    fn older_show_glyph_list_true_does_not_stick() {
+        // Pre-pyramid saves wrote show_glyph_list:true as the old always-on default.
+        // The renamed field must ignore that key so Overview stays clear.
+        let settings: Settings =
+            serde_json::from_str(r#"{"show_glyph_list":true,"show_guides":true}"#).unwrap();
+        assert!(!settings.glyph_list_in_overview);
+        assert!(settings.show_guides);
     }
 
     #[test]

@@ -180,6 +180,23 @@ pub struct FoundryWindow {
     pub glyph_name_edit: String,
     pub unicode_edit: String,
     pub edits_for: Option<String>,
+    /// Last inspector focus bucket; when it changes, section open-state is reapplied for one frame.
+    inspector_focus: InspectorFocus,
+    /// When true, the next inspector draw forces CollapsingHeader open-state from the bools below.
+    pub inspector_apply_open: bool,
+    pub inspector_font_open: bool,
+    pub inspector_style_open: bool,
+    pub inspector_glyph_open: bool,
+    pub inspector_selection_open: bool,
+}
+
+/// Which inspector sections should lead, driven by mode and selection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InspectorFocus {
+    OverviewEmpty,
+    OverviewGlyph,
+    EditorEmpty,
+    EditorSelection,
 }
 
 impl FoundryWindow {
@@ -229,11 +246,76 @@ impl FoundryWindow {
             glyph_name_edit: String::new(),
             unicode_edit: String::new(),
             edits_for: None,
+            inspector_focus: InspectorFocus::OverviewEmpty,
+            inspector_apply_open: true,
+            inspector_font_open: true,
+            inspector_style_open: true,
+            inspector_glyph_open: false,
+            inspector_selection_open: false,
         }
     }
 
     pub fn has_font(&self) -> bool {
         self.session.font().is_some()
+    }
+
+    /// Left glyph tree: Editor/Review/Split by default; Overview only when the override is on.
+    pub fn glyph_list_visible(&self) -> bool {
+        if !self.has_font() {
+            return false;
+        }
+        self.settings.glyph_list_in_overview
+            || self.settings.split_main
+            || matches!(self.mode, Mode::Editor | Mode::Review)
+    }
+
+    /// Pyramid focus for the inspector. Reapplied only when the bucket changes.
+    pub fn sync_inspector_focus(&mut self) {
+        let focus = if self.mode == Mode::Editor
+            || (self.settings.split_main && self.mode != Mode::Review)
+        {
+            if self.selection.is_empty() {
+                InspectorFocus::EditorEmpty
+            } else {
+                InspectorFocus::EditorSelection
+            }
+        } else if self.current.is_some() {
+            // Overview or Review with a glyph in focus: Glyph section joins Font/Style.
+            InspectorFocus::OverviewGlyph
+        } else {
+            InspectorFocus::OverviewEmpty
+        };
+        if focus == self.inspector_focus {
+            return;
+        }
+        self.inspector_focus = focus;
+        self.inspector_apply_open = true;
+        match focus {
+            InspectorFocus::OverviewEmpty => {
+                self.inspector_font_open = true;
+                self.inspector_style_open = true;
+                self.inspector_glyph_open = false;
+                self.inspector_selection_open = false;
+            }
+            InspectorFocus::OverviewGlyph => {
+                self.inspector_font_open = true;
+                self.inspector_style_open = true;
+                self.inspector_glyph_open = true;
+                self.inspector_selection_open = false;
+            }
+            InspectorFocus::EditorEmpty => {
+                self.inspector_font_open = false;
+                self.inspector_style_open = false;
+                self.inspector_glyph_open = true;
+                self.inspector_selection_open = false;
+            }
+            InspectorFocus::EditorSelection => {
+                self.inspector_font_open = false;
+                self.inspector_style_open = false;
+                self.inspector_glyph_open = false;
+                self.inspector_selection_open = true;
+            }
+        }
     }
 
     // ---- The session bridge -------------------------------------------------------------
@@ -1067,7 +1149,13 @@ impl FoundryWindow {
                     self.view = None;
                 }
                 ui.separator();
-                ui.checkbox(&mut self.settings.show_glyph_list, "Glyph list");
+                ui.checkbox(
+                    &mut self.settings.glyph_list_in_overview,
+                    "Glyph tree in Overview",
+                )
+                .on_hover_text(
+                    "Force the glyph tree on in Overview too. Editor, Review, and Split show it either way.",
+                );
                 ui.checkbox(&mut self.settings.show_inspector, "Inspector");
                 if item(ui, "Review sheet pane", "Ctrl+3", has_font) {
                     self.mode = Mode::Review;
@@ -1183,10 +1271,10 @@ impl FoundryWindow {
             if self.icon_button(
                 ui,
                 "layout-cells",
-                "Overview",
+                "",
                 self.mode == Mode::Overview && !self.settings.split_main,
                 true,
-                "Overview",
+                "Overview · Ctrl+1",
             ) {
                 self.mode = Mode::Overview;
                 self.settings.split_main = false;
@@ -1194,10 +1282,10 @@ impl FoundryWindow {
             if self.icon_button(
                 ui,
                 "pencil-to-square",
-                "Editor",
+                "",
                 self.mode == Mode::Editor,
                 self.current.is_some(),
-                "Editor · in Split, the editor takes the right side",
+                "Editor · Ctrl+2 · in Split, the editor takes the right side",
             ) {
                 // Editor and Review pick what the main area or the Split right side shows. They
                 // leave Split on, so Split and either pane work together.
@@ -1206,10 +1294,10 @@ impl FoundryWindow {
             if self.icon_button(
                 ui,
                 "text",
-                "Review",
+                "",
                 self.mode == Mode::Review,
                 self.has_font(),
-                "Review sheet · Ctrl+3. In Split, the review sheet takes the right side",
+                "Review · Ctrl+3 · in Split, the review sheet takes the right side",
             ) {
                 self.mode = Mode::Review;
             }
@@ -1227,61 +1315,55 @@ impl FoundryWindow {
                 }
             }
             ui.separator();
-            for (tool, icon, label, hover) in [
+            for (tool, icon, hover) in [
                 (
                     Tool::Select,
                     "location-arrow",
-                    "Select",
-                    "V · drag points, drag empty space to box-select, Alt-click an outline to add a point",
+                    "Select · V · drag points, drag empty space to box-select, Alt-click an outline to add a point",
                 ),
                 (
                     Tool::Pen,
                     "pencil",
-                    "Pen",
-                    "P · click to add corner points, Shift-click for off-curve, click the first point to close",
+                    "Pen · P · click to add corner points, Shift-click for off-curve, click the first point to close",
                 ),
                 (
                     Tool::Rectangle,
                     "square",
-                    "Rectangle",
-                    "R · drag to add a closed rectangle",
+                    "Rectangle · R · drag to add a closed rectangle",
                 ),
                 (
                     Tool::Oval,
                     "circle",
-                    "Oval",
-                    "O · drag to add a closed oval",
+                    "Oval · O · drag to add a closed oval",
                 ),
                 (
                     Tool::Lasso,
                     "lasso",
-                    "Lasso",
-                    "L · drag a loop around points. Shift adds to the selection",
+                    "Lasso · L · drag a loop around points. Shift adds to the selection",
                 ),
                 (
                     Tool::Guide,
                     "guide",
-                    "Guide",
-                    "G · drag across for a horizontal guide, or up and down for a vertical one",
+                    "Guide · G · drag across for a horizontal guide, or up and down for a vertical one",
                 ),
             ] {
-                if self.icon_button(ui, icon, label, self.tool == tool, true, hover) {
+                if self.icon_button(ui, icon, "", self.tool == tool, true, hover) {
                     self.choose_tool(tool);
                 }
             }
             ui.separator();
             let (undo, redo) = self.session.history();
-            if self.icon_button(ui, "arrow-rotate-left", "Undo", false, undo > 0, "Undo") {
+            if self.icon_button(ui, "arrow-rotate-left", "", false, undo > 0, "Undo · Ctrl+Z") {
                 self.undo();
             }
-            if self.icon_button(ui, "arrow-rotate-right", "Redo", false, redo > 0, "Redo") {
+            if self.icon_button(ui, "arrow-rotate-right", "", false, redo > 0, "Redo · Ctrl+Y") {
                 self.redo();
             }
             ui.separator();
             if self.icon_button(
                 ui,
                 "magic-wand",
-                "Effects",
+                "",
                 false,
                 self.has_font(),
                 "Effects · Ctrl+E",
@@ -1682,7 +1764,7 @@ impl eframe::App for FoundryWindow {
                 .size_range(160.0..=520.0)
                 .show(ui, |ui| self.preview_pane(ui));
         }
-        if self.settings.show_glyph_list && self.has_font() {
+        if self.glyph_list_visible() {
             egui::Panel::left("glyphs")
                 .resizable(true)
                 .default_size(170.0)
@@ -1691,6 +1773,7 @@ impl eframe::App for FoundryWindow {
                 .show(ui, |ui| self.glyph_list(ui));
         }
         if self.settings.show_inspector && self.has_font() {
+            self.sync_inspector_focus();
             egui::Panel::right("inspector")
                 .resizable(true)
                 .default_size(270.0)
@@ -1913,5 +1996,72 @@ mod tests {
         assert_eq!(parse_unicode("Z"), Some(u32::from('Z')));
         assert_eq!(parse_unicode(""), None);
         assert_eq!(parse_unicode("D800"), None);
+    }
+
+    fn window_with_font() -> FoundryWindow {
+        let mut window = FoundryWindow::new(None, Settings::default());
+        let response = window.session.execute(Command::Create {
+            name: "Test".into(),
+            upm: 1000,
+        });
+        assert!(response.ok, "{}", response.error.unwrap_or_default());
+        window
+    }
+
+    #[test]
+    fn glyph_list_stays_off_in_overview_until_override() {
+        let mut window = window_with_font();
+        window.mode = Mode::Overview;
+        window.settings.split_main = false;
+        window.settings.glyph_list_in_overview = false;
+        assert!(!window.glyph_list_visible());
+
+        window.settings.glyph_list_in_overview = true;
+        assert!(window.glyph_list_visible());
+    }
+
+    #[test]
+    fn glyph_list_shows_in_editor_review_and_split_without_override() {
+        let mut window = window_with_font();
+        window.settings.glyph_list_in_overview = false;
+
+        window.mode = Mode::Editor;
+        window.settings.split_main = false;
+        assert!(window.glyph_list_visible());
+
+        window.mode = Mode::Review;
+        assert!(window.glyph_list_visible());
+
+        window.mode = Mode::Overview;
+        window.settings.split_main = true;
+        assert!(window.glyph_list_visible());
+    }
+
+    #[test]
+    fn inspector_focus_follows_mode_and_selection() {
+        let mut window = window_with_font();
+        window.mode = Mode::Overview;
+        window.current = None;
+        window.sync_inspector_focus();
+        assert!(window.inspector_font_open && window.inspector_style_open);
+        assert!(!window.inspector_glyph_open && !window.inspector_selection_open);
+
+        window.current = Some("A".into());
+        window.sync_inspector_focus();
+        assert!(window.inspector_glyph_open);
+
+        window.mode = Mode::Editor;
+        window.selection.clear();
+        window.sync_inspector_focus();
+        assert!(!window.inspector_font_open && !window.inspector_style_open);
+        assert!(window.inspector_glyph_open && !window.inspector_selection_open);
+
+        window.selection.insert(Handle {
+            contour: 0,
+            point: 0,
+        });
+        window.sync_inspector_focus();
+        assert!(window.inspector_selection_open);
+        assert!(!window.inspector_glyph_open);
     }
 }

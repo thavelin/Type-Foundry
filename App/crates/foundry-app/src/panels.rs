@@ -2,11 +2,9 @@
 
 use eframe::egui;
 use foundry_api::GlyphGroup;
-use foundry_app::palette::MUTED;
 use serde_json::{Value, json};
 
 use crate::app::{FoundryWindow, GlyphEntry, Mode, Scope, parse_unicode};
-use crate::color;
 
 impl FoundryWindow {
     /// The glyph tree: each open font, then its glyphs in groups such as Uppercase and Figures.
@@ -124,31 +122,34 @@ impl FoundryWindow {
     }
 
     pub fn inspector(&mut self, ui: &mut egui::Ui) {
+        let force = self.inspector_apply_open;
+        let font_open = force.then_some(self.inspector_font_open);
+        let style_open = force.then_some(self.inspector_style_open);
+        let glyph_open = force.then_some(self.inspector_glyph_open);
+        let selection_open = force.then_some(self.inspector_selection_open);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
                 egui::CollapsingHeader::new("Font")
-                    .default_open(true)
+                    .open(font_open)
                     .show(ui, |ui| self.font_section(ui));
                 egui::CollapsingHeader::new("Style")
-                    .default_open(true)
+                    .open(style_open)
                     .show(ui, |ui| self.style_section(ui));
                 if self.current.is_some() {
                     egui::CollapsingHeader::new("Glyph")
-                        .default_open(true)
+                        .open(glyph_open)
                         .show(ui, |ui| self.glyph_section(ui));
                 }
-                if self.mode == Mode::Editor && !self.selection.is_empty() {
+                let show_selection = (self.mode == Mode::Editor || self.settings.split_main)
+                    && !self.selection.is_empty();
+                if show_selection {
                     egui::CollapsingHeader::new("Selection")
-                        .default_open(true)
+                        .open(selection_open)
                         .show(ui, |ui| self.selection_section(ui));
                 }
-                ui.add_space(8.0);
-                ui.colored_label(
-                    color(MUTED),
-                    "Every change here is a command on the session, so Ctrl+Z undoes it.",
-                );
             });
+        self.inspector_apply_open = false;
     }
 
     fn font_section(&mut self, ui: &mut egui::Ui) {
