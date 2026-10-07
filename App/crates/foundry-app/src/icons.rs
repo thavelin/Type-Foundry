@@ -33,6 +33,7 @@ const ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../icons/pencil-to-square.svg"),
     ),
     ("square", include_bytes!("../icons/square.svg")),
+    ("text", include_bytes!("../icons/text.svg")),
 ];
 
 #[derive(Default)]

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+use crate::preview::ReviewView;
+
 /// How many files File > Open recent keeps.
 pub const RECENT_LIMIT: usize = 10;
 
@@ -36,6 +38,8 @@ pub struct Settings {
     /// Fraction of the main area given to the overview when split.
     pub split_ratio: f32,
     pub review_place: ReviewPlace,
+    /// The review pane's set, size, and guides.
+    pub review: ReviewView,
 }
 
 /// Where the review sheet sits. A window can be moved and resized on its own.
@@ -68,6 +72,7 @@ impl Default for Settings {
             split_main: false,
             split_ratio: 0.42,
             review_place: ReviewPlace::Bottom,
+            review: ReviewView::default(),
             recent: Vec::new(),
         }
     }

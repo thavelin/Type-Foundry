@@ -6,6 +6,7 @@ mod edit;
 mod error;
 mod family;
 mod font;
+mod group;
 mod import;
 mod kerning;
 mod offset;
@@ -31,6 +32,7 @@ pub use font::{
     Contour, FONT_FORMAT, FONT_VERSION, Font, FontInfo, Glyph, InfoUpdate, KernPair, Kerning,
     Ligature, MAX_UPM, MIN_UPM, Metrics, Point, PointKind, Style,
 };
+pub use group::{GlyphGroup, classify};
 pub use offset::{Corner, OffsetOptions, StrokeKind, offset_font, stroke_font};
 pub use outline::{OutlineIssue, SpacingIssue, check_outlines, check_spacing};
 pub use proof::{ProofOptions, write_proof};

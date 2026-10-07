@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Stroke};
-use foundry_api::{Command, Response, Session};
+use foundry_api::{Command, GlyphGroup, Response, Session};
 use foundry_app::palette::{ALERT, HAIRLINE, MUTED, PANEL, SIGNAL};
 use foundry_app::{Handle, Outline, Pt, Viewport};
 use serde_json::{Value, json};
@@ -22,6 +22,8 @@ use crate::{APP_TITLE, COPY_KEY, GUIDES_KEY, LAST_DIR_KEY, SETTINGS_KEY, color};
 pub enum Mode {
     Overview,
     Editor,
+    /// The review sheet, filling the main area.
+    Review,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,12 +59,16 @@ pub struct FontTab {
     pub id: u32,
     pub family: String,
     pub style: String,
+    pub weight: u16,
+    pub italic: bool,
     pub dirty: bool,
 }
 
+#[derive(Clone)]
 pub struct GlyphEntry {
     pub name: String,
     pub unicode: Option<u32>,
+    pub group: GlyphGroup,
 }
 
 pub enum Drag {
@@ -141,6 +147,9 @@ pub struct FoundryWindow {
     pub x_height: f64,
     pub cap_height: f64,
     pub glyphs: Vec<GlyphEntry>,
+    /// Glyph lists of every open font, by font id, for the glyph tree. The active font's list is
+    /// also in `glyphs`; both are rewritten by `refresh_index`.
+    pub font_glyphs: HashMap<u32, Vec<GlyphEntry>>,
     pub by_unicode: HashMap<u32, String>,
     /// Outlines read from the session, by font id and glyph name.
     pub outlines: HashMap<(u32, String), Outline>,
@@ -191,6 +200,7 @@ impl FoundryWindow {
             x_height: 500.0,
             cap_height: 700.0,
             glyphs: Vec::new(),
+            font_glyphs: HashMap::new(),
             by_unicode: HashMap::new(),
             outlines: HashMap::new(),
             thumbs: HashMap::new(),
@@ -340,22 +350,30 @@ impl FoundryWindow {
             .as_ref()
             .and_then(|data| data["glyphs"].as_array().cloned())
             .unwrap_or_default();
-        self.glyphs = entries
-            .iter()
-            .filter_map(|entry| {
-                Some(GlyphEntry {
-                    name: entry["name"].as_str()?.to_string(),
-                    unicode: entry["unicode"]
-                        .as_u64()
-                        .and_then(|code| u32::try_from(code).ok()),
-                })
-            })
-            .collect();
+        self.glyphs = glyph_entries(&entries);
         self.by_unicode = self
             .glyphs
             .iter()
             .filter_map(|entry| entry.unicode.map(|code| (code, entry.name.clone())))
             .collect();
+        if let Some(id) = self.active {
+            self.font_glyphs.insert(id, self.glyphs.clone());
+        }
+    }
+
+    /// The glyph list of an open font, read once and kept until the font is closed or changed.
+    /// The glyph tree uses this for fonts other than the active one.
+    pub fn font_glyphs_of(&mut self, id: u32) -> Vec<GlyphEntry> {
+        if !self.font_glyphs.contains_key(&id) {
+            let response = self.session.execute(Command::Index { font: Some(id) });
+            let entries = response
+                .data
+                .as_ref()
+                .and_then(|data| data["glyphs"].as_array().cloned())
+                .unwrap_or_default();
+            self.font_glyphs.insert(id, glyph_entries(&entries));
+        }
+        self.font_glyphs[&id].clone()
     }
 
     /// The outline of a glyph in the active font, read through the `glyph` command and cached.
@@ -392,6 +410,17 @@ impl FoundryWindow {
         let Some(data) = response.data else {
             return;
         };
+        let open: Vec<u64> = data["fonts"]
+            .as_array()
+            .map(|fonts| {
+                fonts
+                    .iter()
+                    .filter_map(|font| font["id"].as_u64())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.font_glyphs
+            .retain(|id, _| open.contains(&u64::from(*id)));
         self.tabs = data["fonts"]
             .as_array()
             .map(|fonts| {
@@ -402,6 +431,11 @@ impl FoundryWindow {
                             id: u32::try_from(font["id"].as_u64()?).ok()?,
                             family: font["family"].as_str().unwrap_or_default().to_string(),
                             style: font["style"].as_str().unwrap_or_default().to_string(),
+                            weight: font["weight"]
+                                .as_u64()
+                                .and_then(|weight| u16::try_from(weight).ok())
+                                .unwrap_or(400),
+                            italic: font["italic"].as_bool().unwrap_or(false),
                             dirty: font["dirty"].as_bool().unwrap_or(false),
                         })
                     })
@@ -1017,7 +1051,6 @@ impl FoundryWindow {
                 }
                 if item(ui, "Glyph editor", "Ctrl+2", has_glyph) {
                     self.mode = Mode::Editor;
-                    self.settings.split_main = false;
                 }
                 if item(ui, "Overview and editor", "", has_glyph) {
                     self.settings.split_main = true;
@@ -1036,7 +1069,10 @@ impl FoundryWindow {
                 ui.separator();
                 ui.checkbox(&mut self.settings.show_glyph_list, "Glyph list");
                 ui.checkbox(&mut self.settings.show_inspector, "Inspector");
-                ui.checkbox(&mut self.settings.show_preview, "Review sheet");
+                if item(ui, "Review sheet pane", "Ctrl+3", has_font) {
+                    self.mode = Mode::Review;
+                }
+                ui.checkbox(&mut self.settings.show_preview, "Docked review sheet");
                 ui.horizontal(|ui| {
                     ui.selectable_value(
                         &mut self.settings.review_place,
@@ -1159,12 +1195,23 @@ impl FoundryWindow {
                 ui,
                 "pencil-to-square",
                 "Editor",
-                self.mode == Mode::Editor && !self.settings.split_main,
+                self.mode == Mode::Editor,
                 self.current.is_some(),
-                "Editor",
+                "Editor · in Split, the editor takes the right side",
             ) {
+                // Editor and Review pick what the main area or the Split right side shows. They
+                // leave Split on, so Split and either pane work together.
                 self.mode = Mode::Editor;
-                self.settings.split_main = false;
+            }
+            if self.icon_button(
+                ui,
+                "text",
+                "Review",
+                self.mode == Mode::Review,
+                self.has_font(),
+                "Review sheet · Ctrl+3. In Split, the review sheet takes the right side",
+            ) {
+                self.mode = Mode::Review;
             }
             if ui
                 .selectable_label(self.settings.split_main, "Split")
@@ -1172,7 +1219,7 @@ impl FoundryWindow {
                 .clicked()
             {
                 self.settings.split_main = !self.settings.split_main;
-                if self.settings.split_main && self.current.is_none() {
+                if self.settings.split_main && self.current.is_none() && self.mode != Mode::Review {
                     self.status = (
                         "Pick a glyph to edit beside the overview.".into(),
                         Tone::Quiet,
@@ -1347,7 +1394,9 @@ impl FoundryWindow {
         }
         if pressed(command(Key::Num2)) && self.current.is_some() {
             self.mode = Mode::Editor;
-            self.settings.split_main = false;
+        }
+        if pressed(command(Key::Num3)) && self.has_font() {
+            self.mode = Mode::Review;
         }
         if pressed(command(Key::Equals)) || pressed(command(Key::Plus)) {
             self.zoom(1.25);
@@ -1623,7 +1672,8 @@ impl eframe::App for FoundryWindow {
         egui::Panel::bottom("status")
             .frame(bar)
             .show(ui, |ui| self.status_bar(ui));
-        let review = self.settings.show_preview && self.has_font();
+        // The review pane is the main area in Review mode, so the docked sheet steps aside.
+        let review = self.settings.show_preview && self.has_font() && self.mode != Mode::Review;
         if review && self.settings.review_place == ReviewPlace::Bottom {
             egui::Panel::bottom("preview")
                 .frame(bar)
@@ -1689,17 +1739,24 @@ impl eframe::App for FoundryWindow {
 impl FoundryWindow {
     /// The editor is on screen, either alone or beside the overview.
     fn editing(&self) -> bool {
-        self.current.is_some() && (self.mode == Mode::Editor || self.settings.split_main)
+        self.current.is_some()
+            && match self.mode {
+                Mode::Editor => true,
+                // Split shows the editor on the right unless the review sheet has that side.
+                Mode::Overview => self.settings.split_main,
+                Mode::Review => false,
+            }
     }
 
     fn main_view(&mut self, ui: &mut egui::Ui) {
-        if self.settings.split_main && self.has_font() && self.current.is_some() {
+        if self.settings.split_main && self.has_font() {
             self.split_view(ui);
             return;
         }
         match self.mode {
             Mode::Overview => self.overview(ui),
             Mode::Editor => self.canvas(ui),
+            Mode::Review => self.preview_pane(ui),
         }
     }
 
@@ -1735,7 +1792,14 @@ impl FoundryWindow {
             Stroke::new(1.0, color(foundry_app::palette::HAIRLINE)),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(right), |ui| {
-            self.canvas(ui);
+            // The right side is the review sheet in Review mode, otherwise the glyph editor.
+            if self.mode == Mode::Review {
+                self.preview_pane(ui);
+            } else if self.current.is_some() {
+                self.canvas(ui);
+            } else {
+                ui.weak("Pick a glyph in the overview to edit it here.");
+            }
         });
     }
 }
@@ -1759,6 +1823,25 @@ fn is_writable(path: &Path) -> bool {
 
 /// One typed character, or a hex code of two or more digits with or without `U+`. Empty means
 /// none.
+/// Reads the glyph entries of an `index` response. A glyph with no name is skipped.
+fn glyph_entries(entries: &[Value]) -> Vec<GlyphEntry> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            Some(GlyphEntry {
+                name: entry["name"].as_str()?.to_string(),
+                unicode: entry["unicode"]
+                    .as_u64()
+                    .and_then(|code| u32::try_from(code).ok()),
+                group: GlyphGroup::ALL
+                    .into_iter()
+                    .find(|group| Some(group.label()) == entry["group"].as_str())
+                    .unwrap_or(GlyphGroup::Unencoded),
+            })
+        })
+        .collect()
+}
+
 pub fn parse_unicode(text: &str) -> Option<u32> {
     let text = text.trim();
     if text.is_empty() {

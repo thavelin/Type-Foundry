@@ -5,11 +5,13 @@ use std::path::Path;
 use foundry_core::{
     Anchor, Contour, Corner, ExportFormat, Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix,
     MetricsUpdate, OffsetOptions, PointKind, ProofOptions, Side, StrokeKind, StyleUpdate,
-    blend_fonts, check_family, check_outlines, check_spacing, compatibility, copy_family,
+    blend_fonts, check_family, check_outlines, check_spacing, classify, compatibility, copy_family,
     diff_fonts, export_family, load_family, offset_font, save_family, stroke_font, write_proof,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub use foundry_core::GlyphGroup;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -1006,13 +1008,27 @@ impl Session {
             }
             Command::Index { font } => {
                 let font = self.font_by(font)?;
+                let ligatures: Vec<&str> = font
+                    .kerning
+                    .as_ref()
+                    .map(|kerning| {
+                        kerning
+                            .ligatures
+                            .iter()
+                            .map(|liga| liga.name.as_str())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let glyphs: Vec<Value> = font
                     .glyphs
                     .iter()
                     .map(|glyph| {
+                        let group =
+                            classify(glyph.unicode, ligatures.contains(&glyph.name.as_str()));
                         json!({
                             "name": glyph.name,
                             "unicode": glyph.unicode,
+                            "group": group.label(),
                             "advance": glyph.advance,
                             "contours": glyph.contours.len(),
                             "points": glyph.contours.iter().map(|c| c.points.len()).sum::<usize>(),
