@@ -144,6 +144,8 @@ impl Server {
             "font_audit" => "audit",
             "decision_record" => "record_decision",
             "decision_list" => "list_decisions",
+            "font_critique" => "critique",
+            "critique_resolve" => "resolve_critique",
             other => return Err((INVALID_PARAMS, format!("unknown tool {other}"))),
         };
 
@@ -757,6 +759,32 @@ fn tool_list() -> Value {
             "name": "decision_list",
             "description": "List DesignDecisions stored on the active font.",
             "inputSchema": none
+        },
+        {
+            "name": "font_critique",
+            "description": "Ranked AI-critique suggestions from technical audit and Style Genome design signals, each with confidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "min_gap": { "type": "number", "default": 0 } }
+            }
+        },
+        {
+            "name": "critique_resolve",
+            "description": "Accept or reject a critique suggestion; records a DesignDecision on the font lib.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "accepted": { "type": "boolean" },
+                    "issue": { "type": "string" },
+                    "observation": { "type": "string" },
+                    "intervention": { "type": "string" },
+                    "glyphs": { "type": "array", "items": { "type": "string" } },
+                    "confidence": { "type": "number", "default": 0 },
+                    "layer": { "type": "string" }
+                },
+                "required": ["id", "accepted"]
+            }
         }
     ]) {
         tools.extend(more);
@@ -852,7 +880,9 @@ mod tests {
         assert!(names.contains(&"genome_capture"));
         assert!(names.contains(&"font_audit"));
         assert!(names.contains(&"decision_record"));
-        assert_eq!(names.len(), 44);
+        assert!(names.contains(&"font_critique"));
+        assert!(names.contains(&"critique_resolve"));
+        assert_eq!(names.len(), 46);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }

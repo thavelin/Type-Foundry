@@ -3,11 +3,12 @@
 use std::path::Path;
 
 use foundry_core::{
-    Anchor, Contour, Corner, DesignDecision, ExportFormat, Font, FoundryError, Glyph, InfoUpdate,
-    Kerning, Matrix, MetricsUpdate, OffsetOptions, PointKind, ProofOptions, Side, StrokeKind,
-    StyleUpdate, audit_font, blend_fonts, capture_genome, check_family, check_genome,
-    check_outlines, check_spacing, classify, compatibility, copy_family, diff_fonts, export_family,
-    list_decisions, load_family, measure_font, offset_font, record_decision, save_family,
+    Anchor, Contour, Corner, CritiqueLayer, CritiqueSuggestion, DesignDecision, ExportFormat,
+    Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix, MetricsUpdate, OffsetOptions,
+    PointKind, ProofOptions, Side, StrokeKind, StyleUpdate, audit_font, blend_fonts,
+    capture_genome, check_family, check_genome, check_outlines, check_spacing, classify,
+    compatibility, copy_family, critique_font, diff_fonts, export_family, list_decisions,
+    load_family, measure_font, offset_font, record_decision, resolve_critique, save_family,
     stored_genome, stroke_font, write_proof,
 };
 use serde::{Deserialize, Serialize};
@@ -397,6 +398,28 @@ pub enum Command {
     },
     /// List DesignDecisions stored on the active font (read-only).
     ListDecisions,
+    /// Ranked critiques from audit / Style Genome signals (read-only).
+    Critique {
+        #[serde(default)]
+        min_gap: f64,
+    },
+    /// Accept or reject a critique suggestion; records a DesignDecision.
+    ResolveCritique {
+        id: String,
+        accepted: bool,
+        #[serde(default)]
+        issue: String,
+        #[serde(default)]
+        observation: String,
+        #[serde(default)]
+        intervention: String,
+        #[serde(default)]
+        glyphs: Vec<String>,
+        #[serde(default)]
+        confidence: f64,
+        #[serde(default)]
+        layer: String,
+    },
 }
 
 fn default_stem_tolerance() -> f64 {
@@ -477,7 +500,8 @@ impl Command {
             | Self::Slant { .. }
             | Self::ScaleWidth { .. }
             | Self::CaptureGenome { .. }
-            | Self::RecordDecision { .. } => true,
+            | Self::RecordDecision { .. }
+            | Self::ResolveCritique { .. } => true,
             _ => false,
         }
     }
@@ -1389,6 +1413,51 @@ impl Session {
                     "count": decisions.len(),
                 })))
             }
+            Command::Critique { min_gap } => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let suggestions = critique_font(font, min_gap)?;
+                Ok(Some(json!({
+                    "suggestions": suggestions,
+                    "count": suggestions.len(),
+                })))
+            }
+            Command::ResolveCritique {
+                id,
+                accepted,
+                issue,
+                observation,
+                intervention,
+                glyphs,
+                confidence,
+                layer,
+            } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                // Prefer a live match by id so confidence/text stay in sync with the audit.
+                let live = critique_font(font, 0.0)?;
+                let suggestion = live
+                    .into_iter()
+                    .find(|item| item.id == id)
+                    .unwrap_or(CritiqueSuggestion {
+                        id: id.clone(),
+                        rank: 0,
+                        confidence,
+                        layer: if layer.eq_ignore_ascii_case("technical") {
+                            CritiqueLayer::Technical
+                        } else {
+                            CritiqueLayer::Design
+                        },
+                        issue,
+                        observation,
+                        intervention,
+                        glyphs,
+                    });
+                let count = resolve_critique(font, &suggestion, accepted)?;
+                Ok(Some(json!({
+                    "id": id,
+                    "accepted": accepted,
+                    "count": count,
+                })))
+            }
             Command::Diff { a, b } => {
                 let before = Font::load(Path::new(&a))?;
                 let after = Font::load(Path::new(&b))?;
@@ -2249,5 +2318,42 @@ mod tests {
         let listed = session.execute(Command::ListDecisions);
         assert!(listed.ok, "{listed:?}");
         assert_eq!(listed.data.unwrap()["count"], json!(1));
+
+        // Thicken stem so critique surfaces a design suggestion.
+        let glyph = session.font_mut().unwrap().glyph_mut("H").unwrap();
+        glyph.contours[0].points[1].x = 40.0;
+        glyph.contours[0].points[2].x = 40.0;
+        let critique = session.execute(Command::Critique { min_gap: 0.0 });
+        assert!(critique.ok, "{critique:?}");
+        let suggestions = critique.data.unwrap()["suggestions"]
+            .as_array()
+            .cloned()
+            .unwrap();
+        let stem = suggestions
+            .iter()
+            .find(|item| item["issue"] == "stem")
+            .expect("stem critique");
+        let resolved = session.execute(Command::ResolveCritique {
+            id: stem["id"].as_str().unwrap().into(),
+            accepted: false,
+            issue: stem["issue"].as_str().unwrap_or_default().into(),
+            observation: stem["observation"].as_str().unwrap_or_default().into(),
+            intervention: stem["intervention"].as_str().unwrap_or_default().into(),
+            glyphs: stem["glyphs"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            confidence: stem["confidence"].as_f64().unwrap_or(0.0),
+            layer: stem["layer"].as_str().unwrap_or("design").into(),
+        });
+        assert!(resolved.ok, "{resolved:?}");
+        assert_eq!(resolved.data.unwrap()["accepted"], json!(false));
+        let listed = session.execute(Command::ListDecisions);
+        assert_eq!(listed.data.unwrap()["count"], json!(2));
     }
 }

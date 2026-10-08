@@ -231,7 +231,7 @@ Fonts keep an open `lib` map for foundry data. Keys we use today:
 - `com.typefoundry.styleGenome` — captured Style Genome
 - `com.typefoundry.designDecisions` — array of DesignDecision records
 
-`measure` returns live vertical metrics plus per-glyph advance, sidebearings, and vertical stem widths (same edge clustering as `scale_width`). `capture_genome` writes a genome from sample glyphs (`H`, `I`, `N`, `P`, `R`, `h`, `n`, `u` when present): median primary stem, median sidebearing, and metrics. `stem_tolerance` defaults to 4 units. `get_genome` returns the stored genome or `null`. `check_genome` compares live stems on those samples to the stored genome. `audit` returns technical outline and spacing issues plus design genome issues. `record_decision` appends a DesignDecision; `list_decisions` reads them. `capture_genome` and `record_decision` are undoable edits.
+`measure` returns live vertical metrics plus per-glyph advance, sidebearings, and vertical stem widths (same edge clustering as `scale_width`). `capture_genome` writes a genome from sample glyphs (`H`, `I`, `N`, `P`, `R`, `h`, `n`, `u` when present): median primary stem, median sidebearing, and metrics. `stem_tolerance` defaults to 4 units. `get_genome` returns the stored genome or `null`. `check_genome` compares live stems on those samples to the stored genome. `audit` returns technical outline and spacing issues plus design genome issues. `critique` turns those signals into ranked suggestions with confidence and a proposed intervention (deterministic — no remote model). `resolve_critique` accepts or rejects one suggestion and appends a DesignDecision. `record_decision` / `list_decisions` remain the direct store. `capture_genome`, `record_decision`, and `resolve_critique` are undoable edits.
 
 ```json
 {"op":"measure"}
@@ -239,6 +239,8 @@ Fonts keep an open `lib` map for foundry data. Keys we use today:
 {"op":"get_genome"}
 {"op":"check_genome"}
 {"op":"audit","min_gap":0}
+{"op":"critique","min_gap":0}
+{"op":"resolve_critique","id":"design:stem:H","accepted":true,"issue":"stem","observation":"…","intervention":"…","glyphs":["H"],"confidence":0.88,"layer":"design"}
 {"op":"record_decision","scope":"Vostok Serif","glyphs":["e"],"issue":"counter_closure","observation":"counter too dense","intervention":"open aperture","accepted":true,"confidence":0.9}
 {"op":"list_decisions"}
 ```
@@ -322,6 +324,8 @@ Stdout carries only protocol messages, one JSON-RPC object per line. Logs go to 
 | `font_audit` | `min_gap?` | `audit` |
 | `decision_record` | `accepted`, plus optional `scope`, `glyphs`, `issue`, `observation`, `intervention`, `confidence` | `record_decision` |
 | `decision_list` | none | `list_decisions` |
+| `font_critique` | `min_gap?` | `critique` |
+| `critique_resolve` | `id`, `accepted`, plus optional decision fields | `resolve_critique` |
 
 A tool result is `{"content":[{"type":"text","text":"..."}],"isError":false}`. The text is the command response JSON. `isError` is true when the command response has `ok: false`, or when the arguments do not fit the tool.
 

@@ -233,11 +233,59 @@ impl FoundryWindow {
             {
                 self.run_audit();
             }
+            if ui
+                .button("Critique")
+                .on_hover_text("Ranked suggestions with confidence from audit / genome")
+                .clicked()
+            {
+                self.run_critique();
+            }
         });
         if let Some(report) = self.audit_report.clone() {
             ui.add_space(6.0);
             ui.separator();
             genome_audit_body(ui, &report);
+        }
+        if !self.critique_suggestions.is_empty() {
+            ui.add_space(6.0);
+            ui.separator();
+            ui.strong(format!(
+                "Critique · {} suggestion(s)",
+                self.critique_suggestions.len()
+            ));
+            let suggestions = self.critique_suggestions.clone();
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for suggestion in &suggestions {
+                        let id = suggestion["id"].as_str().unwrap_or_default();
+                        let rank = suggestion["rank"].as_u64().unwrap_or(0);
+                        let confidence = suggestion["confidence"].as_f64().unwrap_or(0.0);
+                        let layer = suggestion["layer"].as_str().unwrap_or("design");
+                        let issue = suggestion["issue"].as_str().unwrap_or_default();
+                        let observation = suggestion["observation"].as_str().unwrap_or_default();
+                        let intervention =
+                            suggestion["intervention"].as_str().unwrap_or_default();
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(color(AMBER), format!("#{rank}"));
+                            ui.strong(issue);
+                            ui.colored_label(color(MUTED), layer);
+                            ui.label(format!("{:.0}%", confidence * 100.0));
+                        });
+                        ui.label(observation);
+                        ui.colored_label(color(SIGNAL), intervention);
+                        ui.horizontal(|ui| {
+                            if ui.button("Accept").clicked() {
+                                self.resolve_critique_suggestion(id, true);
+                            }
+                            if ui.button("Reject").clicked() {
+                                self.resolve_critique_suggestion(id, false);
+                            }
+                        });
+                        ui.separator();
+                    }
+                });
         }
     }
 

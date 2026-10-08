@@ -195,6 +195,8 @@ pub struct FoundryWindow {
     pub genome_snapshot: Option<Value>,
     /// Last `audit` / `check_genome` payload shown in the inspector.
     pub audit_report: Option<Value>,
+    /// Ranked critique suggestions from the last `critique` command.
+    pub critique_suggestions: Vec<Value>,
 }
 
 /// Which inspector sections should lead, driven by mode and selection.
@@ -263,6 +265,7 @@ impl FoundryWindow {
             genome_stem_tolerance: 4.0,
             genome_snapshot: None,
             audit_report: None,
+            critique_suggestions: Vec::new(),
         }
     }
 
@@ -502,6 +505,7 @@ impl FoundryWindow {
         self.thumbs.clear();
         self.genome_snapshot = None;
         self.audit_report = None;
+        self.critique_suggestions.clear();
     }
 
     /// Live measurements into the inspector Genome section.
@@ -600,6 +604,83 @@ impl FoundryWindow {
                 } else {
                     Tone::Quiet
                 },
+            );
+            // Refresh ranked critiques alongside the raw audit.
+            self.run_critique();
+        }
+    }
+
+    /// Ranked critiques from audit / Style Genome signals.
+    pub fn run_critique(&mut self) {
+        let response = self.run(Command::Critique { min_gap: 0.0 });
+        if !response.ok {
+            return;
+        }
+        self.critique_suggestions = response
+            .data
+            .as_ref()
+            .and_then(|data| data["suggestions"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        self.inspector_genome_open = true;
+        self.inspector_apply_open = true;
+        let count = self.critique_suggestions.len();
+        self.status = (
+            if count == 0 {
+                "Critique · nothing to suggest".into()
+            } else {
+                format!("Critique · {count} suggestion(s)")
+            },
+            if count == 0 { Tone::Done } else { Tone::Quiet },
+        );
+    }
+
+    /// Accept or reject a critique by id; records a DesignDecision.
+    pub fn resolve_critique_suggestion(&mut self, id: &str, accepted: bool) {
+        let Some(suggestion) = self
+            .critique_suggestions
+            .iter()
+            .find(|item| item["id"].as_str() == Some(id))
+            .cloned()
+        else {
+            self.status = ("Critique suggestion not found".into(), Tone::Failed);
+            return;
+        };
+        let glyphs = suggestion["glyphs"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let response = self.edit(
+            Command::ResolveCritique {
+                id: id.to_string(),
+                accepted,
+                issue: suggestion["issue"].as_str().unwrap_or_default().into(),
+                observation: suggestion["observation"].as_str().unwrap_or_default().into(),
+                intervention: suggestion["intervention"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                glyphs,
+                confidence: suggestion["confidence"].as_f64().unwrap_or(0.0),
+                layer: suggestion["layer"].as_str().unwrap_or("design").into(),
+            },
+            Scope::Font,
+        );
+        if response.is_some() {
+            self.critique_suggestions
+                .retain(|item| item["id"].as_str() != Some(id));
+            self.status = (
+                if accepted {
+                    "Critique accepted · recorded".into()
+                } else {
+                    "Critique rejected · recorded".into()
+                },
+                Tone::Done,
             );
         }
     }
@@ -760,6 +841,7 @@ impl FoundryWindow {
         self.edits_for = None;
         self.style.loaded_for = None;
         self.audit_report = None;
+        self.critique_suggestions.clear();
         self.genome_snapshot = self.read_stored_genome();
         let keep = self
             .current
@@ -1201,6 +1283,9 @@ impl FoundryWindow {
                     }
                     if item(ui, "Foundry Audit…", "", has_font) {
                         self.run_audit();
+                    }
+                    if item(ui, "Critique…", "", has_font) {
+                        self.run_critique();
                     }
                 });
                 ui.separator();
