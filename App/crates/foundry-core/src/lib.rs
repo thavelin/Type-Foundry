@@ -1,6 +1,7 @@
 //! Font documents and the blend operation that builds a new face from two compatible ones.
 
 mod blend;
+mod critique;
 mod diff;
 mod edit;
 mod error;
@@ -22,6 +23,7 @@ mod ufo;
 mod webfont;
 
 pub use blend::{CompatIssue, blend_fonts, compatibility};
+pub use critique::{CritiqueLayer, CritiqueSuggestion, critique_font, resolve_critique};
 pub use diff::{GlyphDiff, diff_fonts};
 pub use edit::{Anchor, Matrix, MetricsUpdate, Side, glyph_stem_widths};
 pub use error::FoundryError;

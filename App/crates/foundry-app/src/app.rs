@@ -188,6 +188,15 @@ pub struct FoundryWindow {
     pub inspector_style_open: bool,
     pub inspector_glyph_open: bool,
     pub inspector_selection_open: bool,
+    pub inspector_genome_open: bool,
+    /// Absolute units for `capture_genome` (default 4).
+    pub genome_stem_tolerance: f64,
+    /// Last `measure` / `capture_genome` payload shown in the inspector.
+    pub genome_snapshot: Option<Value>,
+    /// Last `audit` / `check_genome` payload shown in the inspector.
+    pub audit_report: Option<Value>,
+    /// Ranked critique suggestions from the last `critique` command.
+    pub critique_suggestions: Vec<Value>,
 }
 
 /// Which inspector sections should lead, driven by mode and selection.
@@ -252,6 +261,11 @@ impl FoundryWindow {
             inspector_style_open: true,
             inspector_glyph_open: false,
             inspector_selection_open: false,
+            inspector_genome_open: true,
+            genome_stem_tolerance: 4.0,
+            genome_snapshot: None,
+            audit_report: None,
+            critique_suggestions: Vec::new(),
         }
     }
 
@@ -296,24 +310,28 @@ impl FoundryWindow {
                 self.inspector_style_open = true;
                 self.inspector_glyph_open = false;
                 self.inspector_selection_open = false;
+                self.inspector_genome_open = true;
             }
             InspectorFocus::OverviewGlyph => {
                 self.inspector_font_open = true;
                 self.inspector_style_open = true;
                 self.inspector_glyph_open = true;
                 self.inspector_selection_open = false;
+                self.inspector_genome_open = true;
             }
             InspectorFocus::EditorEmpty => {
                 self.inspector_font_open = false;
                 self.inspector_style_open = false;
                 self.inspector_glyph_open = true;
                 self.inspector_selection_open = false;
+                self.inspector_genome_open = false;
             }
             InspectorFocus::EditorSelection => {
                 self.inspector_font_open = false;
                 self.inspector_style_open = false;
                 self.inspector_glyph_open = false;
                 self.inspector_selection_open = true;
+                self.inspector_genome_open = false;
             }
         }
     }
@@ -485,6 +503,186 @@ impl FoundryWindow {
             self.outlines.retain(|(font, _), _| *font != id);
         }
         self.thumbs.clear();
+        self.genome_snapshot = None;
+        self.audit_report = None;
+        self.critique_suggestions.clear();
+    }
+
+    /// Live measurements into the inspector Genome section.
+    pub fn measure_genome(&mut self) {
+        let response = self.run(Command::Measure);
+        if response.ok {
+            self.genome_snapshot = response.data;
+            self.inspector_genome_open = true;
+            self.inspector_apply_open = true;
+            let stem = self.genome_snapshot.as_ref().and_then(|data| {
+                data["primary_stem"]
+                    .as_f64()
+                    .map(|stem| format!("{stem:.1}"))
+            });
+            self.status = (
+                match stem {
+                    Some(stem) => format!("Measured · primary stem {stem}"),
+                    None => "Measured · no primary stem on sample glyphs".into(),
+                },
+                Tone::Done,
+            );
+        }
+    }
+
+    /// Capture Style Genome onto the open font (`font.lib`).
+    pub fn capture_genome(&mut self) {
+        let tolerance = self.genome_stem_tolerance;
+        if let Some(data) = self.edit(
+            Command::CaptureGenome {
+                stem_tolerance: tolerance,
+            },
+            Scope::Font,
+        ) {
+            self.genome_snapshot = Some(data);
+            self.inspector_genome_open = true;
+            self.inspector_apply_open = true;
+            self.status = ("Style Genome captured".into(), Tone::Done);
+        }
+    }
+
+    /// Design-only genome check into the inspector.
+    pub fn check_genome(&mut self) {
+        let response = self.run(Command::CheckGenome);
+        if response.ok {
+            self.audit_report = response.data.map(|data| {
+                json!({
+                    "design": {
+                        "issues": data["issues"],
+                        "count": data["count"],
+                    },
+                    "count": data["count"],
+                })
+            });
+            self.inspector_genome_open = true;
+            self.inspector_apply_open = true;
+            let count = self
+                .audit_report
+                .as_ref()
+                .and_then(|data| data["count"].as_u64())
+                .unwrap_or(0);
+            self.status = (
+                if count == 0 {
+                    "Genome check · no design issues".into()
+                } else {
+                    format!("Genome check · {count} issue(s)")
+                },
+                if count == 0 {
+                    Tone::Done
+                } else {
+                    Tone::Quiet
+                },
+            );
+        }
+    }
+
+    /// Technical + design Foundry Audit into the inspector.
+    pub fn run_audit(&mut self) {
+        let response = self.run(Command::Audit { min_gap: 0.0 });
+        if response.ok {
+            self.audit_report = response.data;
+            self.inspector_genome_open = true;
+            self.inspector_apply_open = true;
+            let count = self
+                .audit_report
+                .as_ref()
+                .and_then(|data| data["count"].as_u64())
+                .unwrap_or(0);
+            self.status = (
+                if count == 0 {
+                    "Audit clean".into()
+                } else {
+                    format!("Audit · {count} issue(s)")
+                },
+                if count == 0 {
+                    Tone::Done
+                } else {
+                    Tone::Quiet
+                },
+            );
+            // Refresh ranked critiques alongside the raw audit.
+            self.run_critique();
+        }
+    }
+
+    /// Ranked critiques from audit / Style Genome signals.
+    pub fn run_critique(&mut self) {
+        let response = self.run(Command::Critique { min_gap: 0.0 });
+        if !response.ok {
+            return;
+        }
+        self.critique_suggestions = response
+            .data
+            .as_ref()
+            .and_then(|data| data["suggestions"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        self.inspector_genome_open = true;
+        self.inspector_apply_open = true;
+        let count = self.critique_suggestions.len();
+        self.status = (
+            if count == 0 {
+                "Critique · nothing to suggest".into()
+            } else {
+                format!("Critique · {count} suggestion(s)")
+            },
+            if count == 0 { Tone::Done } else { Tone::Quiet },
+        );
+    }
+
+    /// Accept or reject a critique by id; records a DesignDecision.
+    pub fn resolve_critique_suggestion(&mut self, id: &str, accepted: bool) {
+        let Some(suggestion) = self
+            .critique_suggestions
+            .iter()
+            .find(|item| item["id"].as_str() == Some(id))
+            .cloned()
+        else {
+            self.status = ("Critique suggestion not found".into(), Tone::Failed);
+            return;
+        };
+        let glyphs = suggestion["glyphs"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let response = self.edit(
+            Command::ResolveCritique {
+                id: id.to_string(),
+                accepted,
+                issue: suggestion["issue"].as_str().unwrap_or_default().into(),
+                observation: suggestion["observation"].as_str().unwrap_or_default().into(),
+                intervention: suggestion["intervention"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                glyphs,
+                confidence: suggestion["confidence"].as_f64().unwrap_or(0.0),
+                layer: suggestion["layer"].as_str().unwrap_or("design").into(),
+            },
+            Scope::Font,
+        );
+        if response.is_some() {
+            self.critique_suggestions
+                .retain(|item| item["id"].as_str() != Some(id));
+            self.status = (
+                if accepted {
+                    "Critique accepted · recorded".into()
+                } else {
+                    "Critique rejected · recorded".into()
+                },
+                Tone::Done,
+            );
+        }
     }
 
     pub fn refresh_tabs(&mut self) {
@@ -642,6 +840,9 @@ impl FoundryWindow {
         self.drag = Drag::None;
         self.edits_for = None;
         self.style.loaded_for = None;
+        self.audit_report = None;
+        self.critique_suggestions.clear();
+        self.genome_snapshot = self.read_stored_genome();
         let keep = self
             .current
             .as_ref()
@@ -650,6 +851,15 @@ impl FoundryWindow {
             self.current = self.glyphs.first().map(|entry| entry.name.clone());
             self.view = None;
         }
+    }
+
+    /// Pull a previously captured Style Genome from the open font's `lib`, if any.
+    fn read_stored_genome(&mut self) -> Option<Value> {
+        let response = self.session.execute(Command::GetGenome);
+        if !response.ok {
+            return None;
+        }
+        response.data.filter(|data| !data.is_null())
     }
 
     pub fn switch_to(&mut self, id: u32) {
@@ -995,40 +1205,42 @@ impl FoundryWindow {
                         upm: 1000,
                     });
                 }
-                if item(ui, "Open…", "Ctrl+O", true) {
-                    self.open_file_dialog();
-                }
-                if item(ui, "Open UFO folder…", "", true) {
-                    self.open_ufo_dialog();
-                }
-                if item(ui, "Open SVG folder…", "", true) {
-                    self.open_svg_dialog();
-                }
-                ui.menu_button("Open recent", |ui| {
-                    let recent = self.settings.recent.clone();
-                    if recent.is_empty() {
-                        ui.add_enabled(false, egui::Label::new("No recent files"));
+                ui.menu_button("Open", |ui| {
+                    if item(ui, "Open…", "Ctrl+O", true) {
+                        self.open_file_dialog();
                     }
-                    for path in &recent {
-                        let label = path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.display().to_string());
-                        let exists = path.exists();
-                        if item(ui, &label, "", exists) {
-                            self.open(path.clone());
+                    if item(ui, "Open UFO folder…", "", true) {
+                        self.open_ufo_dialog();
+                    }
+                    if item(ui, "Open SVG folder…", "", true) {
+                        self.open_svg_dialog();
+                    }
+                    if item(ui, "Open family…", "", true) {
+                        self.open_family_dialog();
+                    }
+                    ui.menu_button("Open recent", |ui| {
+                        let recent = self.settings.recent.clone();
+                        if recent.is_empty() {
+                            ui.add_enabled(false, egui::Label::new("No recent files"));
                         }
-                    }
-                    if !recent.is_empty() {
-                        ui.separator();
-                        if item(ui, "Clear list", "", true) {
-                            self.settings.recent.clear();
+                        for path in &recent {
+                            let label = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.display().to_string());
+                            let exists = path.exists();
+                            if item(ui, &label, "", exists) {
+                                self.open(path.clone());
+                            }
                         }
-                    }
+                        if !recent.is_empty() {
+                            ui.separator();
+                            if item(ui, "Clear list", "", true) {
+                                self.settings.recent.clear();
+                            }
+                        }
+                    });
                 });
-                if item(ui, "Open family…", "", true) {
-                    self.open_family_dialog();
-                }
                 ui.separator();
                 if item(ui, "Save", "Ctrl+S", has_font) {
                     self.save();
@@ -1042,21 +1254,40 @@ impl FoundryWindow {
                     self.request_close(id);
                 }
                 ui.separator();
-                if item(ui, "Make italic…", "Ctrl+Shift+I", has_font) {
-                    self.open_italic(None);
-                }
-                if item(ui, "New style from this font…", "Ctrl+Shift+D", has_font) {
-                    self.open_new_style();
-                }
-                if item(ui, "Save family…", "", has_font) {
-                    self.save_family_dialog();
-                }
-                if item(ui, "Export family…", "", has_font) {
-                    self.dialogs.export = Some(crate::family_ui::ExportForm { format: "ttf" });
-                }
-                if item(ui, "Check family", "", has_font) {
-                    self.family_check();
-                }
+                ui.menu_button("Family", |ui| {
+                    if item(ui, "Make italic…", "Ctrl+Shift+I", has_font) {
+                        self.open_italic(None);
+                    }
+                    if item(ui, "New style from this font…", "Ctrl+Shift+D", has_font) {
+                        self.open_new_style();
+                    }
+                    if item(ui, "Save family…", "", has_font) {
+                        self.save_family_dialog();
+                    }
+                    if item(ui, "Export family…", "", has_font) {
+                        self.dialogs.export = Some(crate::family_ui::ExportForm { format: "ttf" });
+                    }
+                    if item(ui, "Check family", "", has_font) {
+                        self.family_check();
+                    }
+                });
+                ui.menu_button("Style Genome", |ui| {
+                    if item(ui, "Measure…", "", has_font) {
+                        self.measure_genome();
+                    }
+                    if item(ui, "Capture genome", "", has_font) {
+                        self.capture_genome();
+                    }
+                    if item(ui, "Check genome", "", has_font) {
+                        self.check_genome();
+                    }
+                    if item(ui, "Foundry Audit…", "", has_font) {
+                        self.run_audit();
+                    }
+                    if item(ui, "Critique…", "", has_font) {
+                        self.run_critique();
+                    }
+                });
                 ui.separator();
                 if item(ui, "Quit", "Ctrl+Q", true) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1080,18 +1311,20 @@ impl FoundryWindow {
                     self.delete_selection();
                 }
                 ui.separator();
-                if item(ui, "Make smooth", "", has_selection) {
-                    self.set_smooth(true);
-                }
-                if item(ui, "Make corner", "", has_selection) {
-                    self.set_smooth(false);
-                }
-                if item(ui, "Make on-curve", "", has_selection) {
-                    self.set_kind(true);
-                }
-                if item(ui, "Make off-curve", "", has_selection) {
-                    self.set_kind(false);
-                }
+                ui.menu_button("Point", |ui| {
+                    if item(ui, "Make smooth", "", has_selection) {
+                        self.set_smooth(true);
+                    }
+                    if item(ui, "Make corner", "", has_selection) {
+                        self.set_smooth(false);
+                    }
+                    if item(ui, "Make on-curve", "", has_selection) {
+                        self.set_kind(true);
+                    }
+                    if item(ui, "Make off-curve", "", has_selection) {
+                        self.set_kind(false);
+                    }
+                });
                 if item(ui, "Reverse contour direction", "", has_glyph) {
                     self.reverse_contours();
                 }
@@ -1127,77 +1360,84 @@ impl FoundryWindow {
                 });
             });
             ui.menu_button("View", |ui| {
-                if item(ui, "Font overview", "Ctrl+1", has_font) {
-                    self.mode = Mode::Overview;
-                    self.settings.split_main = false;
-                }
-                if item(ui, "Glyph editor", "Ctrl+2", has_glyph) {
-                    self.mode = Mode::Editor;
-                }
-                if item(ui, "Overview and editor", "", has_glyph) {
-                    self.settings.split_main = true;
-                    self.mode = Mode::Editor;
-                }
-                ui.separator();
-                if item(ui, "Zoom in", "Ctrl+=", has_glyph) {
-                    self.zoom(1.25);
-                }
-                if item(ui, "Zoom out", "Ctrl+-", has_glyph) {
-                    self.zoom(0.8);
-                }
-                if item(ui, "Fit glyph", "Ctrl+0", has_glyph) {
-                    self.view = None;
-                }
-                ui.separator();
-                ui.checkbox(
-                    &mut self.settings.glyph_list_in_overview,
-                    "Glyph tree in Overview",
-                )
-                .on_hover_text(
-                    "Force the glyph tree on in Overview too. Editor, Review, and Split show it either way.",
-                );
-                ui.checkbox(&mut self.settings.show_inspector, "Inspector");
-                if item(ui, "Review sheet pane", "Ctrl+3", has_font) {
-                    self.mode = Mode::Review;
-                }
-                ui.checkbox(&mut self.settings.show_preview, "Docked review sheet");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut self.settings.review_place,
-                        ReviewPlace::Bottom,
-                        "Bottom",
-                    );
-                    ui.selectable_value(
-                        &mut self.settings.review_place,
-                        ReviewPlace::Right,
-                        "Right",
-                    );
-                    ui.selectable_value(
-                        &mut self.settings.review_place,
-                        ReviewPlace::Float,
-                        "Window",
-                    );
+                ui.menu_button("Mode", |ui| {
+                    if item(ui, "Font overview", "Ctrl+1", has_font) {
+                        self.mode = Mode::Overview;
+                        self.settings.split_main = false;
+                    }
+                    if item(ui, "Glyph editor", "Ctrl+2", has_glyph) {
+                        self.mode = Mode::Editor;
+                    }
+                    if item(ui, "Overview and editor", "", has_glyph) {
+                        self.settings.split_main = true;
+                        self.mode = Mode::Editor;
+                    }
+                    if item(ui, "Review sheet pane", "Ctrl+3", has_font) {
+                        self.mode = Mode::Review;
+                    }
                 });
-                ui.checkbox(&mut self.family_preview, "Preview every style");
-                let onion = self.settings.onion_skin;
-                ui.checkbox(&mut self.settings.onion_skin, "Onion skin")
+                ui.menu_button("Canvas", |ui| {
+                    if item(ui, "Zoom in", "Ctrl+=", has_glyph) {
+                        self.zoom(1.25);
+                    }
+                    if item(ui, "Zoom out", "Ctrl+-", has_glyph) {
+                        self.zoom(0.8);
+                    }
+                    if item(ui, "Fit glyph", "Ctrl+0", has_glyph) {
+                        self.view = None;
+                    }
+                });
+                ui.menu_button("Panels", |ui| {
+                    ui.checkbox(
+                        &mut self.settings.glyph_list_in_overview,
+                        "Glyph tree in Overview",
+                    )
                     .on_hover_text(
-                        "Previous and next glyphs beside this one, outlines only, no handles.",
+                        "Force the glyph tree on in Overview too. Editor, Review, and Split show it either way.",
                     );
-                if self.settings.onion_skin && !onion {
-                    self.view = None;
-                }
-                ui.checkbox(&mut self.settings.show_guides, "Guides");
-                ui.horizontal(|ui| {
-                    ui.label("Background");
-                    ui.selectable_value(&mut self.settings.dark_canvas, false, "White");
-                    ui.selectable_value(&mut self.settings.dark_canvas, true, "Black");
+                    ui.checkbox(&mut self.settings.show_inspector, "Inspector");
+                    ui.checkbox(&mut self.settings.show_preview, "Docked review sheet");
+                    ui.horizontal(|ui| {
+                        ui.label("Dock");
+                        ui.selectable_value(
+                            &mut self.settings.review_place,
+                            ReviewPlace::Bottom,
+                            "Bottom",
+                        );
+                        ui.selectable_value(
+                            &mut self.settings.review_place,
+                            ReviewPlace::Right,
+                            "Right",
+                        );
+                        ui.selectable_value(
+                            &mut self.settings.review_place,
+                            ReviewPlace::Float,
+                            "Window",
+                        );
+                    });
+                    ui.checkbox(&mut self.family_preview, "Preview every style");
                 });
-                ui.separator();
-                ui.checkbox(&mut self.settings.fill, "Fill");
-                ui.checkbox(&mut self.settings.outline, "Outline stroke");
-                ui.checkbox(&mut self.settings.metrics, "Metrics");
-                ui.checkbox(&mut self.settings.point_numbers, "Point numbers");
+                ui.menu_button("Display", |ui| {
+                    let onion = self.settings.onion_skin;
+                    ui.checkbox(&mut self.settings.onion_skin, "Onion skin")
+                        .on_hover_text(
+                            "Previous and next glyphs beside this one, outlines only, no handles.",
+                        );
+                    if self.settings.onion_skin && !onion {
+                        self.view = None;
+                    }
+                    ui.checkbox(&mut self.settings.show_guides, "Guides");
+                    ui.horizontal(|ui| {
+                        ui.label("Background");
+                        ui.selectable_value(&mut self.settings.dark_canvas, false, "White");
+                        ui.selectable_value(&mut self.settings.dark_canvas, true, "Black");
+                    });
+                    ui.separator();
+                    ui.checkbox(&mut self.settings.fill, "Fill");
+                    ui.checkbox(&mut self.settings.outline, "Outline stroke");
+                    ui.checkbox(&mut self.settings.metrics, "Metrics");
+                    ui.checkbox(&mut self.settings.point_numbers, "Point numbers");
+                });
                 ui.separator();
                 if item(ui, "Settings…", "Ctrl+,", true) {
                     self.dialogs.settings = true;
@@ -1223,37 +1463,51 @@ impl FoundryWindow {
                 }
             });
             ui.menu_button("Tools", |ui| {
-                for (tool, icon, label) in [
-                    (Tool::Select, "location-arrow", "Select   V"),
-                    (Tool::Lasso, "lasso", "Lasso   L"),
-                    (Tool::Pen, "pencil", "Pen   P"),
-                    (Tool::Rectangle, "square", "Rectangle   R"),
-                    (Tool::Oval, "circle", "Oval   O"),
-                    (Tool::Guide, "guide", "Guide   G"),
-                ] {
-                    if self.icon_menu(ui, icon, label, self.tool == tool) {
-                        self.choose_tool(tool);
+                ui.menu_button("Select", |ui| {
+                    for (tool, icon, label) in [
+                        (Tool::Select, "location-arrow", "Select   V"),
+                        (Tool::Lasso, "lasso", "Lasso   L"),
+                    ] {
+                        if self.icon_menu(ui, icon, label, self.tool == tool) {
+                            self.choose_tool(tool);
+                        }
                     }
+                });
+                ui.menu_button("Draw", |ui| {
+                    for (tool, icon, label) in [
+                        (Tool::Pen, "pencil", "Pen   P"),
+                        (Tool::Rectangle, "square", "Rectangle   R"),
+                        (Tool::Oval, "circle", "Oval   O"),
+                    ] {
+                        if self.icon_menu(ui, icon, label, self.tool == tool) {
+                            self.choose_tool(tool);
+                        }
+                    }
+                });
+                if self.icon_menu(ui, "guide", "Guide   G", self.tool == Tool::Guide) {
+                    self.choose_tool(Tool::Guide);
                 }
             });
             ui.menu_button("Effects", |ui| {
                 if item(ui, "Transform…", "Ctrl+E", has_font) {
                     self.effects.open = true;
                 }
-                ui.separator();
-                for (label, effect) in crate::effects::QUICK {
-                    if item(ui, label, "", has_glyph) {
-                        self.effects.quick(effect);
-                        self.effects.open = true;
+                ui.menu_button("Quick", |ui| {
+                    for (label, effect) in crate::effects::QUICK {
+                        if item(ui, label, "", has_glyph) {
+                            self.effects.quick(effect);
+                            self.effects.open = true;
+                        }
                     }
-                }
-                ui.separator();
-                if item(ui, "Round coordinates (glyph)", "", has_glyph) {
-                    self.round_glyphs(false);
-                }
-                if item(ui, "Round coordinates (all glyphs)", "", has_font) {
-                    self.round_glyphs(true);
-                }
+                });
+                ui.menu_button("Round coordinates", |ui| {
+                    if item(ui, "This glyph", "", has_glyph) {
+                        self.round_glyphs(false);
+                    }
+                    if item(ui, "All glyphs", "", has_font) {
+                        self.round_glyphs(true);
+                    }
+                });
             });
             ui.menu_button("Help", |ui| {
                 if item(ui, "Keyboard shortcuts", "F1", true) {
@@ -2006,6 +2260,52 @@ mod tests {
         });
         assert!(response.ok, "{}", response.error.unwrap_or_default());
         window
+    }
+
+    #[test]
+    fn measure_and_capture_update_inspector_state() {
+        let mut window = window_with_font();
+        let put = json!({
+            "op": "put_glyph",
+            "glyph": {
+                "name": "H",
+                "unicode": 72,
+                "advance": 120.0,
+                "contours": [
+                    {"closed": true, "points": [
+                        {"x": 0.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 20.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 20.0, "y": 100.0, "kind": "on", "smooth": false},
+                        {"x": 0.0, "y": 100.0, "kind": "on", "smooth": false}
+                    ]},
+                    {"closed": true, "points": [
+                        {"x": 80.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 100.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 100.0, "y": 100.0, "kind": "on", "smooth": false},
+                        {"x": 80.0, "y": 100.0, "kind": "on", "smooth": false}
+                    ]}
+                ]
+            }
+        });
+        assert!(window.edit_json(put, Scope::Structure).is_some());
+        window.measure_genome();
+        let snap = window
+            .genome_snapshot
+            .as_ref()
+            .expect("measure fills snapshot");
+        assert_eq!(snap["primary_stem"], json!(20.0));
+        window.capture_genome();
+        assert!(
+            window.genome_snapshot.as_ref().unwrap()["primary_stem"]
+                .as_f64()
+                .is_some()
+        );
+        window.run_audit();
+        assert!(
+            window.audit_report.as_ref().unwrap()["count"]
+                .as_u64()
+                .is_some()
+        );
     }
 
     #[test]
