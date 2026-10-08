@@ -161,6 +161,45 @@ impl FoundryWindow {
     }
 
     fn genome_section(&mut self, ui: &mut egui::Ui) {
+        // Actions first so they stay above the fold when the docked review sheet is open.
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Measure")
+                .on_hover_text("Live stems and sidebearings (measure)")
+                .clicked()
+            {
+                self.measure_genome();
+            }
+            if ui
+                .button("Capture")
+                .on_hover_text("Store Style Genome on the font")
+                .clicked()
+            {
+                self.capture_genome();
+            }
+            if ui
+                .button("Check")
+                .on_hover_text("Compare live stems to the captured genome")
+                .clicked()
+            {
+                self.check_genome();
+            }
+            if ui
+                .button("Audit")
+                .on_hover_text("Technical outline/spacing plus design genome issues")
+                .clicked()
+            {
+                self.run_audit();
+            }
+            if ui
+                .button("Critique")
+                .on_hover_text("Ranked suggestions with confidence from audit / genome")
+                .clicked()
+            {
+                self.run_critique();
+            }
+        });
+        ui.add_space(4.0);
         egui::Grid::new("genome_fields")
             .num_columns(2)
             .spacing([8.0, 6.0])
@@ -203,59 +242,24 @@ impl FoundryWindow {
                     ui.end_row();
                 }
             });
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .button("Measure")
-                .on_hover_text("Live stems and sidebearings (measure)")
-                .clicked()
-            {
-                self.measure_genome();
-            }
-            if ui
-                .button("Capture")
-                .on_hover_text("Store Style Genome on the font")
-                .clicked()
-            {
-                self.capture_genome();
-            }
-            if ui
-                .button("Check")
-                .on_hover_text("Compare live stems to the captured genome")
-                .clicked()
-            {
-                self.check_genome();
-            }
-            if ui
-                .button("Audit")
-                .on_hover_text("Technical outline/spacing plus design genome issues")
-                .clicked()
-            {
-                self.run_audit();
-            }
-            if ui
-                .button("Critique")
-                .on_hover_text("Ranked suggestions with confidence from audit / genome")
-                .clicked()
-            {
-                self.run_critique();
-            }
-        });
-        if let Some(report) = self.audit_report.clone() {
-            ui.add_space(6.0);
-            ui.separator();
-            genome_audit_body(ui, &report);
-        }
+        // Critique list before the raw audit dump — Accept/Reject is the primary action.
         if !self.critique_suggestions.is_empty() {
             ui.add_space(6.0);
             ui.separator();
+            let total = self.critique_suggestions.len();
+            let shown = total.min(15);
             ui.strong(format!(
-                "Critique · {} suggestion(s)",
-                self.critique_suggestions.len()
+                "Critique · showing {shown} of {total} (by confidence)"
             ));
-            let suggestions = self.critique_suggestions.clone();
+            let suggestions: Vec<Value> = self
+                .critique_suggestions
+                .iter()
+                .take(15)
+                .cloned()
+                .collect();
             egui::ScrollArea::vertical()
-                .max_height(260.0)
+                .id_salt("genome_critique_list")
+                .max_height(220.0)
                 .show(ui, |ui| {
                     for suggestion in &suggestions {
                         let id = suggestion["id"].as_str().unwrap_or_default();
@@ -272,20 +276,31 @@ impl FoundryWindow {
                             ui.strong(issue);
                             ui.colored_label(color(MUTED), layer);
                             ui.label(format!("{:.0}%", confidence * 100.0));
-                        });
-                        ui.label(observation);
-                        ui.colored_label(color(SIGNAL), intervention);
-                        ui.horizontal(|ui| {
-                            if ui.button("Accept").clicked() {
+                            if ui
+                                .button("Accept")
+                                .on_hover_text("Record as accepted DesignDecision")
+                                .clicked()
+                            {
                                 self.resolve_critique_suggestion(id, true);
                             }
-                            if ui.button("Reject").clicked() {
+                            if ui
+                                .button("Reject")
+                                .on_hover_text("Record as rejected DesignDecision")
+                                .clicked()
+                            {
                                 self.resolve_critique_suggestion(id, false);
                             }
                         });
+                        ui.label(observation);
+                        ui.colored_label(color(SIGNAL), intervention);
                         ui.separator();
                     }
                 });
+        }
+        if let Some(report) = self.audit_report.clone() {
+            ui.add_space(6.0);
+            ui.separator();
+            genome_audit_body(ui, &report);
         }
     }
 
