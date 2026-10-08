@@ -231,11 +231,12 @@ Fonts keep an open `lib` map for foundry data. Keys we use today:
 - `com.typefoundry.styleGenome` — captured Style Genome
 - `com.typefoundry.designDecisions` — array of DesignDecision records
 
-`measure` returns live vertical metrics plus per-glyph advance, sidebearings, and vertical stem widths (same edge clustering as `scale_width`). `capture_genome` writes a genome from sample glyphs (`H`, `I`, `N`, `P`, `R`, `h`, `n`, `u` when present): median primary stem, median sidebearing, and metrics. `stem_tolerance` defaults to 4 units. `check_genome` compares live stems on those samples to the stored genome. `audit` returns technical outline and spacing issues plus design genome issues. `record_decision` appends a DesignDecision; `list_decisions` reads them. `capture_genome` and `record_decision` are undoable edits.
+`measure` returns live vertical metrics plus per-glyph advance, sidebearings, and vertical stem widths (same edge clustering as `scale_width`). `capture_genome` writes a genome from sample glyphs (`H`, `I`, `N`, `P`, `R`, `h`, `n`, `u` when present): median primary stem, median sidebearing, and metrics. `stem_tolerance` defaults to 4 units. `get_genome` returns the stored genome or `null`. `check_genome` compares live stems on those samples to the stored genome. `audit` returns technical outline and spacing issues plus design genome issues. `record_decision` appends a DesignDecision; `list_decisions` reads them. `capture_genome` and `record_decision` are undoable edits.
 
 ```json
 {"op":"measure"}
 {"op":"capture_genome","stem_tolerance":4}
+{"op":"get_genome"}
 {"op":"check_genome"}
 {"op":"audit","min_gap":0}
 {"op":"record_decision","scope":"Vostok Serif","glyphs":["e"],"issue":"counter_closure","observation":"counter too dense","intervention":"open aperture","accepted":true,"confidence":0.9}

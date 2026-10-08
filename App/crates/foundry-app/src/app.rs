@@ -759,8 +759,8 @@ impl FoundryWindow {
         self.drag = Drag::None;
         self.edits_for = None;
         self.style.loaded_for = None;
-        self.genome_snapshot = None;
         self.audit_report = None;
+        self.genome_snapshot = self.read_stored_genome();
         let keep = self
             .current
             .as_ref()
@@ -769,6 +769,15 @@ impl FoundryWindow {
             self.current = self.glyphs.first().map(|entry| entry.name.clone());
             self.view = None;
         }
+    }
+
+    /// Pull a previously captured Style Genome from the open font's `lib`, if any.
+    fn read_stored_genome(&mut self) -> Option<Value> {
+        let response = self.session.execute(Command::GetGenome);
+        if !response.ok {
+            return None;
+        }
+        response.data.filter(|data| !data.is_null())
     }
 
     pub fn switch_to(&mut self, id: u32) {
@@ -2166,6 +2175,52 @@ mod tests {
         });
         assert!(response.ok, "{}", response.error.unwrap_or_default());
         window
+    }
+
+    #[test]
+    fn measure_and_capture_update_inspector_state() {
+        let mut window = window_with_font();
+        let put = json!({
+            "op": "put_glyph",
+            "glyph": {
+                "name": "H",
+                "unicode": 72,
+                "advance": 120.0,
+                "contours": [
+                    {"closed": true, "points": [
+                        {"x": 0.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 20.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 20.0, "y": 100.0, "kind": "on", "smooth": false},
+                        {"x": 0.0, "y": 100.0, "kind": "on", "smooth": false}
+                    ]},
+                    {"closed": true, "points": [
+                        {"x": 80.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 100.0, "y": 0.0, "kind": "on", "smooth": false},
+                        {"x": 100.0, "y": 100.0, "kind": "on", "smooth": false},
+                        {"x": 80.0, "y": 100.0, "kind": "on", "smooth": false}
+                    ]}
+                ]
+            }
+        });
+        assert!(window.edit_json(put, Scope::Structure).is_some());
+        window.measure_genome();
+        let snap = window
+            .genome_snapshot
+            .as_ref()
+            .expect("measure fills snapshot");
+        assert_eq!(snap["primary_stem"], json!(20.0));
+        window.capture_genome();
+        assert!(
+            window.genome_snapshot.as_ref().unwrap()["primary_stem"]
+                .as_f64()
+                .is_some()
+        );
+        window.run_audit();
+        assert!(
+            window.audit_report.as_ref().unwrap()["count"]
+                .as_u64()
+                .is_some()
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use foundry_core::{
     StyleUpdate, audit_font, blend_fonts, capture_genome, check_family, check_genome,
     check_outlines, check_spacing, classify, compatibility, copy_family, diff_fonts, export_family,
     list_decisions, load_family, measure_font, offset_font, record_decision, save_family,
-    stroke_font, write_proof,
+    stored_genome, stroke_font, write_proof,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -372,6 +372,8 @@ pub enum Command {
     },
     /// Compare live stems to the captured genome (read-only).
     CheckGenome,
+    /// Return the Style Genome stored on `font.lib`, or null (read-only).
+    GetGenome,
     /// Technical outline/spacing checks plus design genome deviations (read-only).
     Audit {
         #[serde(default)]
@@ -1340,6 +1342,16 @@ impl Session {
                 let font = self.font().ok_or(FoundryError::NoFont)?;
                 let issues = check_genome(font)?;
                 Ok(Some(json!({ "issues": issues, "count": issues.len() })))
+            }
+            Command::GetGenome => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                match stored_genome(font)? {
+                    Some(genome) => Ok(Some(
+                        serde_json::to_value(genome)
+                            .map_err(|err| FoundryError::Json(err.to_string()))?,
+                    )),
+                    None => Ok(Some(Value::Null)),
+                }
             }
             Command::Audit { min_gap } => {
                 let font = self.font().ok_or(FoundryError::NoFont)?;
