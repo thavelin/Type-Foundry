@@ -325,12 +325,85 @@ fn draw_line(pixels: &mut [u8], width: u32, height: u32, line: &[Placed], draw: 
             vline(pixels, width, height, x, [0x5B, 0x4A, 0x2D, 0xFF]);
             vline(pixels, width, height, right, [0x5B, 0x4A, 0x2D, 0xFF]);
         }
-        for contour in &placed.contours {
-            fill_contour(pixels, width, height, contour, scale, baseline, color);
+        // Fill every contour of the glyph in one even-odd path so counters stay open.
+        fill_glyph_contours(
+            pixels,
+            width,
+            height,
+            &placed.contours,
+            scale,
+            baseline,
+            color,
+        );
+    }
+}
+
+fn fill_glyph_contours(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    contours: &[Vec<(f64, f64)>],
+    scale: f64,
+    baseline: f64,
+    color: [u8; 4],
+) {
+    let mut mapped: Vec<Vec<(f64, f64)>> = Vec::new();
+    for contour in contours {
+        if contour.len() < 3 {
+            continue;
+        }
+        let mut ring: Vec<(f64, f64)> = contour
+            .iter()
+            .map(|(x, y)| (MARGIN + *x * scale, baseline - *y * scale))
+            .collect();
+        if ring.first() != ring.last() {
+            ring.push(*ring.first().unwrap());
+        }
+        mapped.push(ring);
+    }
+    if mapped.is_empty() {
+        return;
+    }
+    let min_y = mapped
+        .iter()
+        .flatten()
+        .map(|point| point.1)
+        .fold(f64::INFINITY, f64::min)
+        .floor() as i32;
+    let max_y = mapped
+        .iter()
+        .flatten()
+        .map(|point| point.1)
+        .fold(f64::NEG_INFINITY, f64::max)
+        .ceil() as i32;
+    for y in min_y.max(0)..=max_y.min(height as i32 - 1) {
+        let scan = y as f64 + 0.5;
+        let mut hits = Vec::new();
+        for ring in &mapped {
+            for index in 0..ring.len() - 1 {
+                let a = ring[index];
+                let b = ring[index + 1];
+                if (a.1 > scan) == (b.1 > scan) || (b.1 - a.1).abs() < 1e-9 {
+                    continue;
+                }
+                let t = (scan - a.1) / (b.1 - a.1);
+                hits.push(a.0 + (b.0 - a.0) * t);
+            }
+        }
+        hits.sort_by(f64::total_cmp);
+        let mut index = 0;
+        while index + 1 < hits.len() {
+            let left = hits[index].ceil() as i32;
+            let right = hits[index + 1].floor() as i32;
+            for x in left.max(0)..=right.min(width as i32 - 1) {
+                blend(pixels, width, x as u32, y as u32, color);
+            }
+            index += 2;
         }
     }
 }
 
+#[allow(dead_code)]
 fn fill_contour(
     pixels: &mut [u8],
     width: u32,

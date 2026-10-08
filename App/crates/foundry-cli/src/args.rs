@@ -42,11 +42,15 @@ pub enum Cli {
         file: Option<PathBuf>,
     },
     Mcp,
+    Version,
 }
 
 pub fn parse(args: &[String]) -> Result<Cli, String> {
     if args.is_empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
         return Ok(Cli::Help);
+    }
+    if args[0] == "version" || args[0] == "--version" || args[0] == "-V" {
+        return Ok(Cli::Version);
     }
     let (command, rest) = args.split_first().expect("args is not empty");
     let parsed = parse_flags(rest)?;

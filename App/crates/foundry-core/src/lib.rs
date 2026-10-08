@@ -8,6 +8,7 @@ mod error;
 mod family;
 mod font;
 mod genome;
+mod geometry;
 mod group;
 mod import;
 mod kerning;
@@ -16,14 +17,20 @@ mod outline;
 mod proof;
 mod save;
 mod sfnt;
+mod smooth;
 mod svgfont;
+mod symmetry;
 mod ttf;
 mod typeface;
 mod ufo;
+mod vostok_tests;
 mod webfont;
 
 pub use blend::{CompatIssue, blend_fonts, compatibility};
-pub use critique::{CritiqueLayer, CritiqueSuggestion, critique_font, resolve_critique};
+pub use critique::{
+    CritiqueLayer, CritiqueSuggestion, critique_font, filter_rejected, resolve_critique,
+    resolve_critique_with,
+};
 pub use diff::{GlyphDiff, diff_fonts};
 pub use edit::{Anchor, Matrix, MetricsUpdate, Side, glyph_stem_widths};
 pub use error::FoundryError;
@@ -39,7 +46,18 @@ pub use genome::{
     DECISIONS_KEY, DesignDecision, GENOME_KEY, GenomeIssue, STEM_SAMPLES, StyleGenome, audit_font,
     capture_genome, check_genome, list_decisions, measure_font, record_decision, stored_genome,
 };
+pub use geometry::{ItalicMode, ValidityIssue, measure_stems_ray, outline_valid};
 pub use group::{GlyphGroup, classify};
-pub use offset::{Corner, OffsetOptions, StrokeKind, offset_font, stroke_font};
+pub use offset::{
+    Corner, OffsetMode, OffsetOptions, OffsetReport, StrokeKind, ZoneOptions, offset_font,
+    offset_font_detailed, stroke_font,
+};
 pub use outline::{OutlineIssue, SpacingIssue, check_outlines, check_spacing};
 pub use proof::{ProofOptions, write_proof};
+pub use smooth::{
+    SmoothOptions, SmoothTarget, SmoothnessReport, check_smoothness, smooth_outlines,
+};
+pub use symmetry::{
+    AxisSpec, MirrorOptions, SymmetrizeOptions, check_symmetry, glyph_from_mirror, mirror_glyphs,
+    symmetrize_glyphs,
+};

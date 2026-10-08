@@ -587,13 +587,14 @@ impl Font {
     pub fn legacy_names(&self) -> (String, String) {
         let bold = self.style.weight == 700;
         let ribbi = self.style.weight == 400 || bold;
+        let width_name = width_class_name(self.style.width);
         let style = match (bold, self.style.italic) {
             (true, true) => "Bold Italic",
             (true, false) => "Bold",
             (false, true) => "Italic",
             (false, false) => "Regular",
         };
-        if ribbi {
+        if ribbi && width_name.is_none() {
             return (self.style.family.clone(), style.to_string());
         }
         let extra: Vec<&str> = self
@@ -602,19 +603,45 @@ impl Font {
             .split_whitespace()
             .filter(|word| !word.eq_ignore_ascii_case("italic"))
             .collect();
-        let family = if extra.is_empty() {
+        let mut family = if ribbi {
+            self.style.family.clone()
+        } else if extra.is_empty() {
             format!("{} W{}", self.style.family, self.style.weight)
         } else {
             format!("{} {}", self.style.family, extra.join(" "))
         };
-        let style = if self.style.italic {
-            "Italic"
+        if let Some(width) = width_name {
+            family = format!("{family} {width}");
+        }
+        let style = if ribbi && width_name.is_some() {
+            style.to_string()
+        } else if self.style.italic {
+            "Italic".to_string()
+        } else if ribbi {
+            style.to_string()
         } else {
-            "Regular"
+            "Regular".to_string()
         };
-        (family, style.to_string())
+        (family, style)
     }
+}
 
+fn width_class_name(width: u16) -> Option<&'static str> {
+    match width {
+        1 => Some("Ultra Condensed"),
+        2 => Some("Extra Condensed"),
+        3 => Some("Condensed"),
+        4 => Some("Semi Condensed"),
+        5 => None,
+        6 => Some("Semi Expanded"),
+        7 => Some("Expanded"),
+        8 => Some("Extra Expanded"),
+        9 => Some("Ultra Expanded"),
+        _ => None,
+    }
+}
+
+impl Font {
     pub(crate) fn validate(&self) -> Result<(), FoundryError> {
         if self.format != FONT_FORMAT {
             return Err(FoundryError::Format(self.format.clone()));

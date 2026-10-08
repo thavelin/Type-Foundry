@@ -1,30 +1,52 @@
-//! Move existing points along their normals so a weight change stays compatible.
+//! Weight offset: move points along normals so a master stays blend-compatible.
 //!
-//! Horizontal and vertical amounts are separate: a stem can grow more than a hairline. By default
-//! the point count does not change. Vertical extrema (baseline, overshoot, cap height) stay where
-//! they are. Where two edges already face each other, growth stops at `gap` so a counter does not
-//! close and a corner does not cross itself.
-//!
-//! `add_points` with `corner: round` changes the count on purpose. Each sharp corner on the outside
-//! of a turn becomes an arc: two on-curve points at the ends of the offset edges, joined by one
-//! cubic. That is the only way a round join can be drawn with points, so the result no longer
-//! blends with the original master, the same as a stroke.
+//! Points mode follows `documents/geometry-tools-spec.md` §2. Clean mode builds a true
+//! geometric offset (point count may change). `add_points` with `corner: round` inserts
+//! cubic arcs at sharp outside corners for compatibility with the prior API.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::error::FoundryError;
-use crate::font::{Contour, Font, Glyph, Point, PointKind};
+use crate::font::{Contour, Font, Glyph, Metrics, Point, PointKind};
+use crate::geometry::{
+    ItalicFrame, ItalicMode, V2, contour_nesting, flatten_contour, grow_is_left_of_travel,
+    ink_bounds, joins, measure_bars_ray, measure_stems_ray, neighbor_index, next_segment,
+    outline_valid, prev_segment, ray_cast_boundary, round_glyph, signed_area_points,
+};
+use crate::group::{GlyphGroup, classify};
+use crate::smooth::{SmoothOptions, smooth_glyph};
 
+/// Corner join style for offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Corner {
-    /// Extend the corner until the offset edges meet, clamped so a sharp serif cannot spike.
+    /// Extend to the edge intersection, capped by `miter_limit`.
     Miter,
-    /// One point cannot become an arc. The corner moves by the same amount as [`Corner::Angle`].
+    /// In points mode same as [`Corner::Keep`]; with `add_points` builds an arc.
     Round,
-    /// Move along the corner bisector and keep the original corner.
-    #[default]
+    /// Alias of [`Corner::Keep`].
     Angle,
+    /// Move along the corner bisector and keep the original corner angle.
+    #[default]
+    Keep,
+}
+
+impl Corner {
+    fn is_keep(self) -> bool {
+        matches!(self, Self::Keep | Self::Angle | Self::Round)
+    }
+}
+
+/// How [`offset_font`] builds the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OffsetMode {
+    /// Move existing points; structure stays blend-compatible.
+    #[default]
+    Points,
+    /// Geometric offset with joins, then curve re-fit (`compatible: false`).
+    Clean,
 }
 
 /// How [`stroke_font`] turns an offset into a display style.
@@ -37,6 +59,62 @@ pub enum StrokeKind {
     Inline,
 }
 
+/// Zone pinning for vertical metrics (and optional glyph extremes).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ZoneOptions {
+    #[serde(default = "default_true")]
+    pub baseline: bool,
+    #[serde(default = "default_true")]
+    pub x_height: bool,
+    #[serde(default = "default_true")]
+    pub cap_height: bool,
+    #[serde(default = "default_true")]
+    pub descender: bool,
+    #[serde(default = "default_true")]
+    pub ascender: bool,
+    #[serde(default = "default_true")]
+    pub glyph_extremes: bool,
+    #[serde(default = "default_overshoot")]
+    pub overshoot: f64,
+}
+
+impl Default for ZoneOptions {
+    fn default() -> Self {
+        Self {
+            baseline: true,
+            x_height: true,
+            cap_height: true,
+            descender: true,
+            ascender: true,
+            glyph_extremes: true,
+            overshoot: 12.0,
+        }
+    }
+}
+
+impl ZoneOptions {
+    fn all_off() -> Self {
+        Self {
+            baseline: false,
+            x_height: false,
+            cap_height: false,
+            descender: false,
+            ascender: false,
+            glyph_extremes: false,
+            overshoot: 12.0,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_overshoot() -> f64 {
+    12.0
+}
+
+/// Options for [`offset_font`] / [`offset_font_detailed`].
 #[derive(Debug, Clone)]
 pub struct OffsetOptions {
     pub horizontal: f64,
@@ -48,6 +126,20 @@ pub struct OffsetOptions {
     /// Insert arc points at round joins. Needs `corner: round`.
     pub add_points: bool,
     pub names: Option<Vec<String>>,
+    pub mode: OffsetMode,
+    pub zones: ZoneOptions,
+    pub counter_share: f64,
+    pub min_gap_ratio: f64,
+    pub gap_window: f64,
+    pub miter_limit: f64,
+    pub smooth_sigma: f64,
+    pub post_smooth: bool,
+    pub italic: ItalicMode,
+    pub round: bool,
+    pub points: Option<Vec<(usize, usize)>>,
+    pub contours: Option<Vec<usize>>,
+    pub family: bool,
+    pub preview: bool,
 }
 
 impl Default for OffsetOptions {
@@ -56,26 +148,256 @@ impl Default for OffsetOptions {
             horizontal: 0.0,
             vertical: 0.0,
             gap: 0.0,
-            corner: Corner::Angle,
+            corner: Corner::Keep,
             sidebearing: false,
             keep_metrics: true,
             add_points: false,
             names: None,
+            mode: OffsetMode::Points,
+            zones: ZoneOptions::default(),
+            counter_share: 0.85,
+            min_gap_ratio: 0.72,
+            gap_window: 60.0,
+            miter_limit: 2.0,
+            smooth_sigma: 10.0,
+            post_smooth: true,
+            italic: ItalicMode::Auto,
+            round: true,
+            points: None,
+            contours: None,
+            family: false,
+            preview: false,
         }
     }
 }
 
+impl OffsetOptions {
+    /// Build options from the API command fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        horizontal: f64,
+        vertical: f64,
+        gap: f64,
+        corner: Corner,
+        sidebearing: bool,
+        keep_metrics: bool,
+        add_points: bool,
+        names: Option<Vec<String>>,
+        mode: OffsetMode,
+        zones: Option<ZoneOptions>,
+        counter_share: f64,
+        min_gap_ratio: f64,
+        gap_window: f64,
+        miter_limit: f64,
+        smooth_sigma: f64,
+        post_smooth: bool,
+        italic: &str,
+        round: bool,
+        points: Option<Vec<(usize, usize)>>,
+        contours: Option<Vec<usize>>,
+        family: bool,
+        preview: bool,
+    ) -> Self {
+        let zones = match zones {
+            Some(z) => z,
+            None if keep_metrics => ZoneOptions::default(),
+            None => ZoneOptions::all_off(),
+        };
+        Self {
+            horizontal,
+            vertical,
+            gap,
+            corner,
+            sidebearing,
+            keep_metrics,
+            add_points,
+            names,
+            mode,
+            zones,
+            counter_share,
+            min_gap_ratio,
+            gap_window,
+            miter_limit,
+            smooth_sigma,
+            post_smooth,
+            italic: ItalicMode::from_field(italic),
+            round,
+            points,
+            contours,
+            family,
+            preview,
+        }
+    }
+}
+
+/// Per-run report from [`offset_font_detailed`].
+#[derive(Debug, Clone, Serialize)]
+pub struct OffsetReport {
+    pub changed: Vec<String>,
+    pub unchanged: Vec<String>,
+    pub reduced: Vec<Value>,
+    pub fallback: Vec<Value>,
+    pub skipped_open: Vec<Value>,
+    pub compatible: bool,
+    pub report: Value,
+}
+
 /// Offset the named glyphs, or every glyph. Returns the names that changed.
 pub fn offset_font(font: &mut Font, options: &OffsetOptions) -> Result<Vec<String>, FoundryError> {
+    let report = offset_font_detailed(font, options)?;
+    Ok(report.changed)
+}
+
+/// Offset with the full §2.6 report.
+pub fn offset_font_detailed(
+    font: &mut Font,
+    options: &OffsetOptions,
+) -> Result<OffsetReport, FoundryError> {
     check_options(options)?;
     let names = target_names(font, options.names.as_deref())?;
+    let mut changed = Vec::new();
+    let mut unchanged = Vec::new();
+    let mut reduced = Vec::new();
+    let mut fallback = Vec::new();
+    let mut skipped_open = Vec::new();
+    let mut stems_before = None;
+    let mut stems_after = None;
+    let mut bars_before = None;
+    let mut bars_after = None;
+    let mut counters_before = None;
+    let mut counters_after = None;
+    let mut min_gap_kept = options.min_gap_ratio;
+
+    let frame = ItalicFrame::for_font(font, options.italic);
+    let metrics = font.metrics.clone();
+    let upm = font.upm as f64;
+
     for name in &names {
-        let glyph = font
-            .glyph_mut(name)
-            .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?;
-        offset_glyph(glyph, options)?;
+        let source = font
+            .glyph(name)
+            .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?
+            .clone();
+        if source.contours.is_empty() {
+            unchanged.push(name.clone());
+            continue;
+        }
+
+        if name == "H" {
+            stems_before = Some(measure_stems_ray(&source, metrics.cap_height));
+            bars_before = Some(measure_bars_ray(&source));
+        }
+        if name == "o" {
+            counters_before = Some(counter_width(&source));
+        }
+
+        let mut working = source.clone();
+        if let Some(frame) = &frame {
+            frame.enter_glyph(&mut working);
+        }
+        let source_framed = working.clone();
+
+        let outcome = match options.mode {
+            OffsetMode::Points => offset_glyph_points(
+                &mut working,
+                &source_framed,
+                options,
+                &metrics,
+                upm,
+                &mut skipped_open,
+            )?,
+            OffsetMode::Clean => {
+                offset_glyph_clean(&mut working, &source_framed, options, &metrics)?;
+                GlyphOutcome::Changed
+            }
+        };
+
+        if let Some(frame) = &frame {
+            frame.leave_glyph(&mut working);
+        }
+        if options.round && options.mode == OffsetMode::Points {
+            round_glyph(&mut working);
+        }
+        if options.sidebearing {
+            shift_sidebearings(&mut working, options.horizontal);
+        }
+
+        match outcome {
+            GlyphOutcome::Unchanged => unchanged.push(name.clone()),
+            GlyphOutcome::Changed => {
+                if name == "H" {
+                    stems_after = Some(measure_stems_ray(&working, metrics.cap_height));
+                    bars_after = Some(measure_bars_ray(&working));
+                }
+                if name == "o" {
+                    counters_after = Some(counter_width(&working));
+                }
+                *font
+                    .glyph_mut(name)
+                    .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))? = working;
+                changed.push(name.clone());
+            }
+            GlyphOutcome::Reduced(factor) => {
+                reduced.push(json!({ "name": name, "factor": factor }));
+                if name == "H" {
+                    stems_after = Some(measure_stems_ray(&working, metrics.cap_height));
+                    bars_after = Some(measure_bars_ray(&working));
+                }
+                if name == "o" {
+                    counters_after = Some(counter_width(&working));
+                }
+                *font
+                    .glyph_mut(name)
+                    .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))? = working;
+                changed.push(name.clone());
+            }
+            GlyphOutcome::Fallback(reason) => {
+                fallback.push(json!({
+                    "name": name,
+                    "reason": reason,
+                    "action": "kept original"
+                }));
+                unchanged.push(name.clone());
+            }
+        }
     }
-    Ok(names)
+
+    let compatible = options.mode == OffsetMode::Points && options.corner != Corner::Round
+        || !options.add_points;
+    let compatible = compatible && options.mode == OffsetMode::Points && !options.add_points;
+
+    let mut report_obj = serde_json::Map::new();
+    if let (Some(b), Some(a)) = (stems_before, stems_after)
+        && let (Some(&sb), Some(&sa)) = (b.first(), a.first())
+    {
+        report_obj.insert("stems".into(), json!({ "H": [sb, sa] }));
+    }
+    if let (Some(b), Some(a)) = (bars_before, bars_after)
+        && let (Some(&sb), Some(&sa)) = (b.first(), a.first())
+    {
+        report_obj.insert("bars".into(), json!({ "H": [sb, sa] }));
+    }
+    if let (Some(b), Some(a)) = (counters_before, counters_after) {
+        report_obj.insert("counters".into(), json!({ "o": [b, a] }));
+    }
+    report_obj.insert("min_gap_kept".into(), json!(min_gap_kept));
+    let _ = &mut min_gap_kept;
+
+    Ok(OffsetReport {
+        changed,
+        unchanged,
+        reduced,
+        fallback,
+        skipped_open,
+        compatible,
+        report: Value::Object(report_obj),
+    })
+}
+
+enum GlyphOutcome {
+    Unchanged,
+    Changed,
+    Reduced(f64),
+    Fallback(&'static str),
 }
 
 /// Build an outline or inline style. Each source contour becomes two, so the result does not
@@ -91,10 +413,13 @@ pub fn stroke_font(
         StrokeKind::Outline => (1.0, -1.0),
         StrokeKind::Inline => (-1.0, -2.0),
     };
+    let metrics = font.metrics.clone();
+    let upm = font.upm as f64;
     for name in &names {
-        let glyph = font
-            .glyph_mut(name)
-            .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?;
+        let source = font
+            .glyph(name)
+            .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?
+            .clone();
         let mut outward = options.clone();
         outward.horizontal *= outer;
         outward.vertical *= outer;
@@ -103,13 +428,17 @@ pub fn stroke_font(
         inward.horizontal *= inner;
         inward.vertical *= inner;
         inward.sidebearing = false;
-        let mut shell = glyph.clone();
-        let mut core = glyph.clone();
-        offset_glyph(&mut shell, &outward)?;
-        offset_glyph(&mut core, &inward)?;
+        let mut shell = source.clone();
+        let mut core = source.clone();
+        let mut skipped = Vec::new();
+        let _ = offset_glyph_points(&mut shell, &source, &outward, &metrics, upm, &mut skipped)?;
+        let _ = offset_glyph_points(&mut core, &source, &inward, &metrics, upm, &mut skipped)?;
         for contour in &mut core.contours {
             contour.points.reverse();
         }
+        let glyph = font
+            .glyph_mut(name)
+            .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?;
         glyph.contours = shell.contours;
         glyph.contours.append(&mut core.contours);
         if options.sidebearing {
@@ -120,7 +449,17 @@ pub fn stroke_font(
 }
 
 fn check_options(options: &OffsetOptions) -> Result<(), FoundryError> {
-    let values = [options.horizontal, options.vertical, options.gap];
+    let values = [
+        options.horizontal,
+        options.vertical,
+        options.gap,
+        options.counter_share,
+        options.min_gap_ratio,
+        options.gap_window,
+        options.miter_limit,
+        options.smooth_sigma,
+        options.zones.overshoot,
+    ];
     if values.iter().any(|value| !value.is_finite()) {
         return Err(FoundryError::NonFinite);
     }
@@ -132,6 +471,11 @@ fn check_options(options: &OffsetOptions) -> Result<(), FoundryError> {
     if options.add_points && options.corner != Corner::Round {
         return Err(FoundryError::Edit(
             "offset add_points needs corner round".into(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&options.counter_share) {
+        return Err(FoundryError::Edit(
+            "offset counter_share must be between 0 and 1".into(),
         ));
     }
     Ok(())
@@ -151,44 +495,971 @@ fn target_names(font: &Font, names: Option<&[String]>) -> Result<Vec<String>, Fo
     }
 }
 
-fn offset_glyph(glyph: &mut Glyph, options: &OffsetOptions) -> Result<(), FoundryError> {
-    if options.horizontal == 0.0 && options.vertical == 0.0 {
-        return Ok(());
-    }
-    let holes = hole_flags(&glyph.contours);
-    let mut proposed: Vec<Vec<Point>> = Vec::with_capacity(glyph.contours.len());
-    for (index, contour) in glyph.contours.iter().enumerate() {
-        proposed.push(offset_contour(contour, holes[index], options)?);
-    }
-    if options.gap > 0.0 {
-        limit_gaps(&glyph.contours, &mut proposed, options.gap);
-    }
-    // After gap limiting, which compares points by index. Arcs change the count, so they go last.
-    if options.add_points {
-        for (index, contour) in glyph.contours.iter().enumerate() {
-            proposed[index] = with_round_joins(contour, holes[index], options, &proposed[index]);
+fn shift_sidebearings(glyph: &mut Glyph, horizontal: f64) {
+    for contour in &mut glyph.contours {
+        for point in &mut contour.points {
+            point.x += horizontal;
         }
     }
-    for (contour, points) in glyph.contours.iter_mut().zip(proposed) {
-        contour.points = points;
-    }
-    if options.sidebearing {
-        shift_sidebearings(glyph, options.horizontal);
-    }
-    Ok(())
+    glyph.advance += horizontal * 2.0;
 }
 
-/// The moved points of one contour, with each open round join replaced by its four arc points.
+fn counter_width(glyph: &Glyph) -> f64 {
+    if glyph.contours.len() < 2 {
+        return 0.0;
+    }
+    let nesting = contour_nesting(&glyph.contours);
+    let mut best = 0.0_f64;
+    for (index, (_, outer)) in nesting.iter().enumerate() {
+        if *outer {
+            continue;
+        }
+        let (min_x, max_x, _, _) = ink_bounds(&Glyph {
+            name: String::new(),
+            unicode: None,
+            advance: 0.0,
+            contours: vec![glyph.contours[index].clone()],
+        });
+        best = best.max(max_x - min_x);
+    }
+    best
+}
+
+// --- Points mode -----------------------------------------------------------
+
+fn offset_glyph_points(
+    glyph: &mut Glyph,
+    source: &Glyph,
+    options: &OffsetOptions,
+    metrics: &Metrics,
+    upm: f64,
+    skipped_open: &mut Vec<Value>,
+) -> Result<GlyphOutcome, FoundryError> {
+    if options.horizontal.abs() < 1e-12 && options.vertical.abs() < 1e-12 {
+        return Ok(GlyphOutcome::Unchanged);
+    }
+    if is_dot_glyph(glyph, upm) {
+        scale_dot(glyph, options.horizontal);
+        return Ok(GlyphOutcome::Changed);
+    }
+    let mut factor = 1.0;
+    let mut last_reason = "self-intersection";
+    for attempt in 0..9 {
+        let mut trial = source.clone();
+        let mut open_notes = Vec::new();
+        let ok = apply_points_with_optional_arcs(
+            &mut trial,
+            source,
+            options,
+            metrics,
+            factor,
+            &mut open_notes,
+        )?;
+        if !ok {
+            return Ok(GlyphOutcome::Unchanged);
+        }
+        let issues = if options.add_points {
+            Vec::new()
+        } else {
+            outline_valid(&trial, Some(source))
+        };
+        if issues.is_empty() {
+            *glyph = trial;
+            skipped_open.extend(open_notes);
+            if attempt == 0 {
+                return Ok(GlyphOutcome::Changed);
+            }
+            return Ok(GlyphOutcome::Reduced(factor));
+        }
+        last_reason = issues[0].code;
+        if attempt == 8 {
+            skipped_open.extend(open_notes);
+            return Ok(GlyphOutcome::Fallback(last_reason));
+        }
+        factor *= 0.93;
+    }
+    Ok(GlyphOutcome::Fallback(last_reason))
+}
+
+fn apply_points_once(
+    glyph: &mut Glyph,
+    source: &Glyph,
+    options: &OffsetOptions,
+    metrics: &Metrics,
+    amount_scale: f64,
+    skipped_open: &mut Vec<Value>,
+) -> Result<bool, FoundryError> {
+    let h = options.horizontal * amount_scale;
+    let v = options.vertical * amount_scale;
+    if h.abs() < 1e-12 && v.abs() < 1e-12 {
+        return Ok(false);
+    }
+
+    let nesting = contour_nesting(&glyph.contours);
+    let has_hole = nesting.iter().any(|(_, outer)| !*outer);
+    let group = classify(glyph.unicode, false);
+    let zone_ys = zone_lines(metrics, &options.zones, group, glyph);
+
+    // Per-contour grow side and share.
+    let mut grow_left = Vec::with_capacity(glyph.contours.len());
+    let mut shares = Vec::with_capacity(glyph.contours.len());
+    for (index, contour) in glyph.contours.iter().enumerate() {
+        if !contour.closed {
+            skipped_open.push(json!({
+                "name": glyph.name,
+                "contour": index,
+                "reason": "open"
+            }));
+            grow_left.push(true);
+            shares.push(1.0);
+            continue;
+        }
+        if contour.points.len() < 3 {
+            grow_left.push(true);
+            shares.push(1.0);
+            continue;
+        }
+        let outer = nesting[index].1;
+        grow_left.push(grow_is_left_of_travel(contour, outer));
+        let share = if has_hole {
+            if outer {
+                2.0 - options.counter_share
+            } else {
+                options.counter_share
+            }
+        } else {
+            1.0
+        };
+        shares.push(share);
+    }
+
+    // Selection masks.
+    let point_sel = options.points.as_deref();
+    let contour_sel = options.contours.as_deref();
+
+    // (1–4) Normals, factors, raw displacement for every on-point.
+    let mut disp: Vec<Vec<Option<V2>>> = Vec::with_capacity(glyph.contours.len());
+    let mut zone_pinned: Vec<Vec<bool>> = Vec::with_capacity(glyph.contours.len());
+
+    for (c_index, contour) in glyph.contours.iter().enumerate() {
+        let count = contour.points.len();
+        let mut d_row = vec![None; count];
+        let mut pin_row = vec![false; count];
+        if !contour.closed || count < 3 {
+            disp.push(d_row);
+            zone_pinned.push(pin_row);
+            continue;
+        }
+        if let Some(list) = contour_sel
+            && !list.contains(&c_index)
+        {
+            disp.push(d_row);
+            zone_pinned.push(pin_row);
+            continue;
+        }
+        let gl = grow_left[c_index];
+        let share = shares[c_index];
+        let join_list = joins(contour);
+        for join in &join_list {
+            let index = join.on;
+            if let Some(sel) = point_sel
+                && !sel.iter().any(|&(c, p)| c == c_index && p == index)
+            {
+                continue;
+            }
+            let Some(normal) = on_point_normal(contour, index, gl) else {
+                continue;
+            };
+            let factor = corner_factor(join.turn, options);
+            let mut d = V2::new(normal.x * h, normal.y * v).mul(factor * share);
+            let pinned = zone_pin_y(
+                V2::from_point(&contour.points[index]),
+                normal,
+                &zone_ys,
+                options.zones.overshoot,
+                &mut d,
+            );
+            pin_row[index] = pinned;
+            d_row[index] = Some(d);
+        }
+        disp.push(d_row);
+        zone_pinned.push(pin_row);
+    }
+
+    // (5) Smooth displacement field along arc length, then re-pin zones.
+    if options.smooth_sigma > 0.0 {
+        for (c_index, contour) in glyph.contours.iter().enumerate() {
+            if !contour.closed || contour.points.len() < 3 {
+                continue;
+            }
+            smooth_displacement_field(contour, &mut disp[c_index], options.smooth_sigma);
+            for (index, slot) in disp[c_index].iter_mut().enumerate() {
+                if let Some(d) = slot.as_mut() {
+                    let Some(normal) = on_point_normal(contour, index, grow_left[c_index]) else {
+                        continue;
+                    };
+                    let pinned = zone_pin_y(
+                        V2::from_point(&contour.points[index]),
+                        normal,
+                        &zone_ys,
+                        options.zones.overshoot,
+                        d,
+                    );
+                    if pinned {
+                        zone_pinned[c_index][index] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // (6) Collision cap + gap guard.
+    collision_cap(glyph, &mut disp, &grow_left, options.gap, h, v);
+    if options.min_gap_ratio > 0.0 && options.gap_window > 0.0 {
+        gap_guard(glyph, &mut disp, options.min_gap_ratio, options.gap_window);
+    }
+
+    // Thinning floor.
+    if h < 0.0 || v < 0.0 {
+        thinning_floor(glyph, &mut disp, &grow_left);
+    }
+
+    // (7) Apply on-points.
+    for (c_index, contour) in glyph.contours.iter_mut().enumerate() {
+        for (index, point) in contour.points.iter_mut().enumerate() {
+            if point.kind != PointKind::On {
+                continue;
+            }
+            if let Some(Some(d)) = disp.get(c_index).and_then(|row| row.get(index)) {
+                point.x += d.x;
+                point.y += d.y;
+            }
+        }
+    }
+
+    // (8) Restore.
+    restore_axis_runs(glyph, source);
+    rebuild_offs_in_chord_frame(glyph, source);
+
+    if options.post_smooth {
+        let smooth_opts = SmoothOptions {
+            axis_snap: true,
+            italic: ItalicMode::Off,
+            round: false,
+            keep_heights: true,
+            ..SmoothOptions::default()
+        };
+        let _ = smooth_glyph(glyph, Some(source), &smooth_opts, None)?;
+    }
+    // Always restore zone y from the source for points that sat on a zone (or were pinned).
+    reapply_zone_pins(glyph, source, &zone_pinned);
+    reapply_zone_ys_from_metrics(glyph, source, metrics, &options.zones, group);
+
+    clamp_offs_to_chord(glyph);
+    Ok(true)
+}
+
+fn on_point_normal(contour: &Contour, index: usize, grow_left: bool) -> Option<V2> {
+    let points = &contour.points;
+    let here = V2::from_point(&points[index]);
+    let (prev_on, in_offs) = prev_segment(points, index, contour.closed)?;
+    let (next_on, out_offs) = next_segment(points, index, contour.closed)?;
+    let in_tan = match in_offs.as_slice() {
+        [] => here.sub(V2::from_point(&points[prev_on])),
+        [c] | [_, c] => here.sub(V2::from_point(c)),
+        _ => return None,
+    };
+    let out_tan = match out_offs.as_slice() {
+        [] => V2::from_point(&points[next_on]).sub(here),
+        [c] | [c, _] => V2::from_point(c).sub(here),
+        _ => return None,
+    };
+    let in_u = in_tan.norm();
+    let out_u = out_tan.norm();
+    if in_u.len() < 1e-8 || out_u.len() < 1e-8 {
+        return None;
+    }
+    let in_n = edge_normal(in_u, grow_left);
+    let out_n = edge_normal(out_u, grow_left);
+    let mixed = in_n.add(out_n).norm();
+    if mixed.len() > 1e-8 {
+        Some(mixed)
+    } else {
+        Some(in_n)
+    }
+}
+
+fn edge_normal(unit: V2, grow_left: bool) -> V2 {
+    if grow_left {
+        unit.perp_left()
+    } else {
+        unit.perp_right()
+    }
+}
+
+fn corner_factor(turn_deg: f64, options: &OffsetOptions) -> f64 {
+    if options.corner.is_keep() {
+        return 1.0;
+    }
+    // Miter: 1 / cos(θ/2), θ = turn.
+    let half = (turn_deg.to_radians() / 2.0).abs();
+    let cos = half.cos().abs().max(1e-6);
+    (1.0 / cos).min(options.miter_limit)
+}
+
+fn zone_lines(
+    metrics: &Metrics,
+    zones: &ZoneOptions,
+    group: GlyphGroup,
+    glyph: &Glyph,
+) -> Vec<(f64, i8)> {
+    // (y, outward_sign) where +1 means outward is up, -1 means outward is down.
+    let mut lines = Vec::new();
+    if zones.baseline {
+        lines.push((metrics.baseline, -1));
+    }
+    if zones.descender {
+        lines.push((metrics.descender, -1));
+    }
+    if zones.ascender {
+        lines.push((metrics.ascender, 1));
+    }
+    match group {
+        GlyphGroup::Lowercase => {
+            if zones.x_height {
+                lines.push((metrics.x_height, 1));
+            }
+        }
+        GlyphGroup::Uppercase | GlyphGroup::Figures => {
+            if zones.cap_height {
+                lines.push((metrics.cap_height, 1));
+            }
+        }
+        _ => {
+            if zones.x_height {
+                lines.push((metrics.x_height, 1));
+            }
+            if zones.cap_height {
+                lines.push((metrics.cap_height, 1));
+            }
+        }
+    }
+    if zones.glyph_extremes {
+        let mut top = f64::NEG_INFINITY;
+        let mut bottom = f64::INFINITY;
+        for contour in &glyph.contours {
+            for point in &contour.points {
+                if point.kind == PointKind::On {
+                    top = top.max(point.y);
+                    bottom = bottom.min(point.y);
+                }
+            }
+        }
+        if top.is_finite() {
+            lines.push((top, 1));
+        }
+        if bottom.is_finite() {
+            lines.push((bottom, -1));
+        }
+    }
+    lines
+}
+
+/// Pin or ramp `d.y` for zone points. Returns true when fully pinned (`d.y = 0`).
+fn zone_pin_y(point: V2, normal: V2, zones: &[(f64, i8)], overshoot: f64, d: &mut V2) -> bool {
+    let mut pinned = false;
+    let mut ramp = 1.0_f64;
+    for &(zone_y, out_sign) in zones {
+        let dy = point.y - zone_y;
+        // Normal must point out of the glyph across that zone.
+        let normal_out = if out_sign > 0 {
+            normal.y > 0.05
+        } else {
+            normal.y < -0.05
+        };
+        if !normal_out {
+            continue;
+        }
+        // On the zone, or within overshoot on the outside.
+        let on_zone = dy.abs() <= 0.51;
+        let outside = if out_sign > 0 {
+            dy > 0.0 && dy <= overshoot
+        } else {
+            dy < 0.0 && dy >= -overshoot
+        };
+        if on_zone || outside {
+            d.y = 0.0;
+            pinned = true;
+            break;
+        }
+        // Ramp: within 100 units inside the zone, scale d.y from 0 at the zone to full at 100.
+        let inside = if out_sign > 0 {
+            (-100.0..0.0).contains(&dy)
+        } else {
+            (0.0..=100.0).contains(&dy) && dy > 0.0
+        };
+        if inside {
+            let dist = dy.abs();
+            if dist < 100.0 {
+                let t = dist / 100.0;
+                ramp = ramp.min(t);
+            }
+        }
+    }
+    if !pinned && ramp < 1.0 {
+        d.y *= ramp;
+    }
+    pinned
+}
+
+fn reapply_zone_pins(glyph: &mut Glyph, source: &Glyph, zone_pinned: &[Vec<bool>]) {
+    for (c_index, contour) in glyph.contours.iter_mut().enumerate() {
+        let Some(src) = source.contours.get(c_index) else {
+            continue;
+        };
+        let Some(pins) = zone_pinned.get(c_index) else {
+            continue;
+        };
+        for (index, point) in contour.points.iter_mut().enumerate() {
+            if point.kind != PointKind::On {
+                continue;
+            }
+            if pins.get(index).copied().unwrap_or(false) {
+                point.y = src.points[index].y;
+            }
+        }
+    }
+}
+
+/// Restore source y for any on-point that sat on a metric/extreme zone line in the source.
+fn reapply_zone_ys_from_metrics(
+    glyph: &mut Glyph,
+    source: &Glyph,
+    metrics: &Metrics,
+    zones: &ZoneOptions,
+    group: GlyphGroup,
+) {
+    let zone_ys = zone_lines(metrics, zones, group, source);
+    if zone_ys.is_empty() {
+        return;
+    }
+    let overshoot = zones.overshoot;
+    for (c_index, contour) in glyph.contours.iter_mut().enumerate() {
+        let Some(src) = source.contours.get(c_index) else {
+            continue;
+        };
+        for (index, point) in contour.points.iter_mut().enumerate() {
+            if point.kind != PointKind::On || index >= src.points.len() {
+                continue;
+            }
+            let sy = src.points[index].y;
+            for &(zone_y, _) in &zone_ys {
+                if (sy - zone_y).abs() <= overshoot.max(0.51) {
+                    point.y = sy;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn smooth_displacement_field(contour: &Contour, disp: &mut [Option<V2>], sigma: f64) {
+    let count = contour.points.len();
+    if count < 3 || sigma <= 0.0 {
+        return;
+    }
+    // Arc-length parameter at each on-point; offs inherit neighbouring on values (skipped).
+    let mut on_indices = Vec::new();
+    for (i, p) in contour.points.iter().enumerate() {
+        if p.kind == PointKind::On && disp[i].is_some() {
+            on_indices.push(i);
+        }
+    }
+    if on_indices.len() < 2 {
+        return;
+    }
+    let mut arc = vec![0.0; on_indices.len()];
+    for i in 1..on_indices.len() {
+        let a = V2::from_point(&contour.points[on_indices[i - 1]]);
+        let b = V2::from_point(&contour.points[on_indices[i]]);
+        arc[i] = arc[i - 1] + a.dist(b);
+    }
+    let total = {
+        let a = V2::from_point(&contour.points[*on_indices.last().unwrap()]);
+        let b = V2::from_point(&contour.points[on_indices[0]]);
+        arc[on_indices.len() - 1] + a.dist(b)
+    };
+    if total < 1e-8 {
+        return;
+    }
+    let src: Vec<V2> = on_indices
+        .iter()
+        .map(|&i| disp[i].unwrap_or(V2::ZERO))
+        .collect();
+    let mut out = vec![V2::ZERO; on_indices.len()];
+    for i in 0..on_indices.len() {
+        let mut wsum = 0.0;
+        let mut acc = V2::ZERO;
+        for j in 0..on_indices.len() {
+            let mut dist = (arc[i] - arc[j]).abs();
+            dist = dist.min(total - dist);
+            let w = (-0.5 * (dist / sigma).powi(2)).exp();
+            wsum += w;
+            acc = acc.add(src[j].mul(w));
+        }
+        if wsum > 1e-12 {
+            out[i] = acc.mul(1.0 / wsum);
+        }
+    }
+    for (k, &index) in on_indices.iter().enumerate() {
+        disp[index] = Some(out[k]);
+    }
+}
+
+fn collision_cap(
+    glyph: &Glyph,
+    disp: &mut [Vec<Option<V2>>],
+    grow_left: &[bool],
+    gap: f64,
+    h: f64,
+    v: f64,
+) {
+    // Build a proposal glyph for ray casts against the current proposal.
+    let mut proposal = glyph.clone();
+    for (c_index, contour) in proposal.contours.iter_mut().enumerate() {
+        for (index, point) in contour.points.iter_mut().enumerate() {
+            if let Some(Some(d)) = disp.get(c_index).and_then(|row| row.get(index)) {
+                point.x += d.x;
+                point.y += d.y;
+            }
+        }
+    }
+
+    let nesting = contour_nesting(&glyph.contours);
+    let outward_for = |contours: &[Contour], grow: &[bool]| {
+        let grow = grow.to_vec();
+        let contours_area: Vec<f64> = contours
+            .iter()
+            .map(|c| signed_area_points(&c.points))
+            .collect();
+        move |c_index: usize, a: V2, b: V2| {
+            let edge = b.sub(a).norm();
+            if edge.len() < 1e-8 {
+                return V2::ZERO;
+            }
+            let gl = grow.get(c_index).copied().unwrap_or(false);
+            // Prefer grow_left; fall back to area-based outward.
+            let left = edge.perp_left();
+            if contours_area.get(c_index).copied().unwrap_or(0.0).abs() < 1e-12 {
+                return if gl { left } else { edge.perp_right() };
+            }
+            if gl { left } else { edge.perp_right() }
+        }
+    };
+
+    let src_out = outward_for(&glyph.contours, grow_left);
+    let prop_out = outward_for(&proposal.contours, grow_left);
+
+    for (c_index, contour) in glyph.contours.iter().enumerate() {
+        if !contour.closed {
+            continue;
+        }
+        for (index, point) in contour.points.iter().enumerate() {
+            if point.kind != PointKind::On {
+                continue;
+            }
+            let Some(Some(d)) = disp[c_index].get(index).cloned() else {
+                continue;
+            };
+            let len = d.len();
+            if len < 1e-8 {
+                continue;
+            }
+            let dir = d.norm();
+            let origin = V2::from_point(point);
+            let hit_src = ray_cast_boundary(origin, dir, &glyph.contours, &src_out);
+            let hit_prop = ray_cast_boundary(origin, dir, &proposal.contours, &prop_out);
+            let hit = match (hit_src, hit_prop) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let Some(hit) = hit else {
+                continue;
+            };
+            // Facing edges that also grow toward us share the room.
+            let share = if (h > 0.0 || v > 0.0) && nesting.len() > 1 {
+                2.0
+            } else {
+                1.0
+            };
+            let allowed = ((hit - gap) / share).max(0.0);
+            if allowed < len {
+                disp[c_index][index] = Some(dir.mul(allowed));
+            }
+        }
+    }
+    let _ = nesting;
+}
+
+fn gap_guard(glyph: &Glyph, disp: &mut [Vec<Option<V2>>], min_ratio: f64, window: f64) {
+    // Sample on-points as proxies for boundary samples.
+    let mut samples: Vec<(usize, usize, V2)> = Vec::new();
+    for (c_index, contour) in glyph.contours.iter().enumerate() {
+        if !contour.closed {
+            continue;
+        }
+        for (index, point) in contour.points.iter().enumerate() {
+            if point.kind == PointKind::On {
+                samples.push((c_index, index, V2::from_point(point)));
+            }
+        }
+    }
+    for _ in 0..3 {
+        let mut scaled = false;
+        for i in 0..samples.len() {
+            for j in (i + 1)..samples.len() {
+                let (c0, p0, a) = samples[i];
+                let (c1, p1, b) = samples[j];
+                // Neighbours on the same contour (within 2 on-points) are skipped.
+                if c0 == c1 {
+                    let contour = &glyph.contours[c0];
+                    let on_idx: Vec<usize> = contour
+                        .points
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.kind == PointKind::On)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if let (Some(i0), Some(i1)) = (
+                        on_idx.iter().position(|&x| x == p0),
+                        on_idx.iter().position(|&x| x == p1),
+                    ) {
+                        let n = on_idx.len() as isize;
+                        let dist = (i0 as isize - i1 as isize)
+                            .abs()
+                            .min(n - (i0 as isize - i1 as isize).abs());
+                        if dist <= 2 {
+                            continue;
+                        }
+                    }
+                }
+                let s = a.dist(b);
+                if s >= window || s < 1e-6 {
+                    continue;
+                }
+                let d0 = disp[c0][p0].unwrap_or(V2::ZERO);
+                let d1 = disp[c1][p1].unwrap_or(V2::ZERO);
+                let new = a.add(d0).dist(b.add(d1));
+                let need = min_ratio * s;
+                if new + 1e-6 < need {
+                    // Scale both displacements back proportionally.
+                    let mid = a.add(d0).lerp(b.add(d1), 0.5);
+                    let dir0 = a.add(d0).sub(mid);
+                    let dir1 = b.add(d1).sub(mid);
+                    let half = need / 2.0;
+                    let n0 = a.sub(mid).norm();
+                    let n1 = b.sub(mid).norm();
+                    let target0 = mid.add(n0.mul(half));
+                    let target1 = mid.add(n1.mul(half));
+                    // Prefer scaling existing d rather than inventing new positions when possible.
+                    let scale = (need / new).min(1.0);
+                    let _ = (dir0, dir1, target0, target1);
+                    if let Some(d) = disp[c0][p0].as_mut() {
+                        *d = d.mul(scale);
+                    }
+                    if let Some(d) = disp[c1][p1].as_mut() {
+                        *d = d.mul(scale);
+                    }
+                    scaled = true;
+                }
+            }
+        }
+        if !scaled {
+            break;
+        }
+    }
+}
+
+fn thinning_floor(glyph: &Glyph, disp: &mut [Vec<Option<V2>>], grow_left: &[bool]) {
+    let outward_for = {
+        let grow = grow_left.to_vec();
+        move |c_index: usize, a: V2, b: V2| {
+            let edge = b.sub(a).norm();
+            if edge.len() < 1e-8 {
+                return V2::ZERO;
+            }
+            if grow.get(c_index).copied().unwrap_or(false) {
+                edge.perp_left()
+            } else {
+                edge.perp_right()
+            }
+        }
+    };
+    for (c_index, contour) in glyph.contours.iter().enumerate() {
+        for (index, point) in contour.points.iter().enumerate() {
+            if point.kind != PointKind::On {
+                continue;
+            }
+            let Some(Some(d)) = disp[c_index].get(index).cloned() else {
+                continue;
+            };
+            if d.len() < 1e-8 {
+                continue;
+            }
+            // Ray opposite grow (into the stroke) to measure current thickness.
+            let into = d.norm().mul(-1.0);
+            let origin = V2::from_point(point);
+            let Some(thickness) = ray_cast_boundary(origin, into, &glyph.contours, &outward_for)
+            else {
+                continue;
+            };
+            let floor = (0.25 * thickness).max(4.0);
+            let room = (thickness - floor).max(0.0);
+            // Thinning moves into the stroke; |d| may not exceed room.
+            if d.len() > room {
+                disp[c_index][index] = Some(d.norm().mul(room));
+            }
+        }
+    }
+}
+
+fn restore_axis_runs(glyph: &mut Glyph, source: &Glyph) {
+    for (c_index, contour) in glyph.contours.iter_mut().enumerate() {
+        let Some(src) = source.contours.get(c_index) else {
+            continue;
+        };
+        if !contour.closed || contour.points.len() < 3 {
+            continue;
+        }
+        let on_idx: Vec<usize> = contour
+            .points
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == PointKind::On)
+            .map(|(i, _)| i)
+            .collect();
+        if on_idx.len() < 2 {
+            continue;
+        }
+        // X runs.
+        let mut i = 0;
+        while i < on_idx.len() {
+            let mut j = i + 1;
+            while j < on_idx.len() {
+                let a = src.points[on_idx[j - 1]].x;
+                let b = src.points[on_idx[j]].x;
+                if (a - b).abs() <= 0.5 {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            // Wrap-around run handled only for a full loop of equal x.
+            if j - i >= 2 {
+                let mean = on_idx[i..j]
+                    .iter()
+                    .map(|&k| contour.points[k].x)
+                    .sum::<f64>()
+                    / (j - i) as f64;
+                for &k in &on_idx[i..j] {
+                    contour.points[k].x = mean;
+                }
+            }
+            i = j.max(i + 1);
+        }
+        // Y runs.
+        i = 0;
+        while i < on_idx.len() {
+            let mut j = i + 1;
+            while j < on_idx.len() {
+                let a = src.points[on_idx[j - 1]].y;
+                let b = src.points[on_idx[j]].y;
+                if (a - b).abs() <= 0.5 {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j - i >= 2 {
+                let mean = on_idx[i..j]
+                    .iter()
+                    .map(|&k| contour.points[k].y)
+                    .sum::<f64>()
+                    / (j - i) as f64;
+                for &k in &on_idx[i..j] {
+                    contour.points[k].y = mean;
+                }
+            }
+            i = j.max(i + 1);
+        }
+    }
+}
+
+fn rebuild_offs_in_chord_frame(glyph: &mut Glyph, source: &Glyph) {
+    for (c_index, contour) in glyph.contours.iter_mut().enumerate() {
+        let Some(src) = source.contours.get(c_index) else {
+            continue;
+        };
+        if !contour.closed {
+            continue;
+        }
+        let count = contour.points.len();
+        for index in 0..count {
+            if src.points[index].kind != PointKind::On {
+                continue;
+            }
+            let Some((next_on, offs)) = next_segment(&src.points, index, true) else {
+                continue;
+            };
+            if offs.is_empty() {
+                continue;
+            }
+            let a_src = V2::from_point(&src.points[index]);
+            let b_src = V2::from_point(&src.points[next_on]);
+            let a = V2::from_point(&contour.points[index]);
+            let b = V2::from_point(&contour.points[next_on]);
+            let chord_src = b_src.sub(a_src);
+            let chord = b.sub(a);
+            let len_src = chord_src.len();
+            let len = chord.len();
+            if len_src < 1e-8 || len < 1e-8 {
+                continue;
+            }
+            let ex_src = chord_src.mul(1.0 / len_src);
+            let ey_src = ex_src.perp_left();
+            let ex = chord.mul(1.0 / len);
+            let ey = ex.perp_left();
+            // Walk offs between index and next_on in the live contour.
+            let mut cursor = neighbor_index(index, count, true, true);
+            let mut off_i = 0;
+            while cursor != next_on && off_i < offs.len() {
+                let p_src = V2::from_point(&src.points[cursor]);
+                let rel = p_src.sub(a_src);
+                let u = rel.dot(ex_src) / len_src;
+                let v = rel.dot(ey_src) / len_src;
+                let world = a.add(ex.mul(u * len)).add(ey.mul(v * len));
+                contour.points[cursor].x = world.x;
+                contour.points[cursor].y = world.y;
+                cursor = neighbor_index(cursor, count, true, true);
+                off_i += 1;
+            }
+        }
+    }
+}
+
+fn clamp_offs_to_chord(glyph: &mut Glyph) {
+    for contour in &mut glyph.contours {
+        if !contour.closed {
+            continue;
+        }
+        let count = contour.points.len();
+        for index in 0..count {
+            if contour.points[index].kind != PointKind::On {
+                continue;
+            }
+            let Some((next_on, offs)) = next_segment(&contour.points, index, true) else {
+                continue;
+            };
+            if offs.is_empty() {
+                continue;
+            }
+            let a = V2::from_point(&contour.points[index]);
+            let b = V2::from_point(&contour.points[next_on]);
+            let chord = b.sub(a);
+            let len = chord.len();
+            if len < 1e-8 {
+                continue;
+            }
+            let ex = chord.mul(1.0 / len);
+            let mut cursor = neighbor_index(index, count, true, true);
+            while cursor != next_on {
+                let p = V2::from_point(&contour.points[cursor]);
+                let t = p.sub(a).dot(ex) / len;
+                let clamped = t.clamp(0.08, 0.92);
+                if (clamped - t).abs() > 1e-9 {
+                    // Keep the perpendicular offset; only clamp along-chord.
+                    let ey = ex.perp_left();
+                    let v = p.sub(a).dot(ey);
+                    let world = a.add(ex.mul(clamped * len)).add(ey.mul(v));
+                    contour.points[cursor].x = world.x;
+                    contour.points[cursor].y = world.y;
+                }
+                cursor = neighbor_index(cursor, count, true, true);
+            }
+        }
+    }
+}
+
+fn is_dot_glyph(glyph: &Glyph, upm: f64) -> bool {
+    if glyph.contours.len() != 1 {
+        return false;
+    }
+    let contour = &glyph.contours[0];
+    if !contour.closed || contour.points.len() < 3 {
+        return false;
+    }
+    // Dots are curved; a boxy serif stem must not match.
+    let has_curve = contour
+        .points
+        .iter()
+        .any(|point| point.kind == PointKind::Off);
+    if !has_curve {
+        return false;
+    }
+    let (min_x, max_x, min_y, max_y) = ink_bounds(glyph);
+    let w = max_x - min_x;
+    let h = max_y - min_y;
+    if w <= 0.0 || h <= 0.0 {
+        return false;
+    }
+    let aspect = w.min(h) / w.max(h);
+    if aspect < 0.7 {
+        return false;
+    }
+    let area = signed_area_points(&contour.points).abs();
+    let bbox = w * h;
+    let fill = area / bbox;
+    // Circles sit near π/4 ≈ 0.785; reject filled rectangles (~1.0).
+    (0.7..0.95).contains(&fill) && w.max(h) < 0.15 * upm
+}
+
+fn scale_dot(glyph: &mut Glyph, horizontal: f64) {
+    let (min_x, max_x, min_y, max_y) = ink_bounds(glyph);
+    let cx = (min_x + max_x) / 2.0;
+    let cy = (min_y + max_y) / 2.0;
+    let width = (max_x - min_x).max(1.0);
+    let scale = 1.0 + 2.0 * horizontal / width;
+    // Top-anchored: keep top y.
+    let top = max_y;
+    for contour in &mut glyph.contours {
+        for point in &mut contour.points {
+            point.x = cx + (point.x - cx) * scale;
+            point.y = cy + (point.y - cy) * scale;
+        }
+    }
+    let (_, _, _, new_top) = ink_bounds(glyph);
+    let dy = top - new_top;
+    for contour in &mut glyph.contours {
+        for point in &mut contour.points {
+            point.y += dy;
+        }
+    }
+}
+
+// --- Round joins (add_points compatibility) --------------------------------
+
 fn with_round_joins(
     contour: &Contour,
-    hole: bool,
+    grow_left: bool,
     options: &OffsetOptions,
     moved: &[Point],
+    zones_active: bool,
 ) -> Vec<Point> {
-    let ccw = signed_area(&contour.points) >= 0.0;
     let mut out = Vec::with_capacity(moved.len() + 2 * contour.points.len());
     for (index, point) in moved.iter().enumerate() {
-        match round_join(contour, index, hole, ccw, options) {
+        match round_join(contour, index, grow_left, options, zones_active) {
             Some(arc) => out.extend(arc),
             None => out.push(point.clone()),
         }
@@ -196,18 +1467,12 @@ fn with_round_joins(
     out
 }
 
-/// The arc that replaces the corner at `index`, or `None` when the corner stays sharp.
-///
-/// A join is drawn only where the offset opens a gap: on the outside of the turn when growing, or
-/// the inside when shrinking. Both amounts must be non-zero, because a join that moves on one
-/// axis only has no arc. With `keep_metrics`, a corner on a metric line stays sharp, as it does
-/// for the moved point.
 fn round_join(
     contour: &Contour,
     index: usize,
-    hole: bool,
-    ccw: bool,
+    grow_left: bool,
     options: &OffsetOptions,
+    zones_active: bool,
 ) -> Option<[Point; 4]> {
     let count = contour.points.len();
     let corner = &contour.points[index];
@@ -217,44 +1482,43 @@ fn round_join(
     if options.horizontal.abs() <= 1e-8 || options.vertical.abs() <= 1e-8 {
         return None;
     }
-    if options.keep_metrics && vertical_extremum(&contour.points, index, true) {
+    if zones_active && vertical_extremum(&contour.points, index, true) {
         return None;
     }
-    let prev = from_point(&contour.points[prev_index(index, count, true)]);
-    let here = from_point(corner);
-    let next = from_point(&contour.points[next_index(index, count, true)]);
-    let in_unit = norm(sub(here, prev));
-    let out_unit = norm(sub(next, here));
-    if len(in_unit) < 1e-8 || len(out_unit) < 1e-8 {
+    let prev = V2::from_point(&contour.points[neighbor_index(index, count, true, false)]);
+    let here = V2::from_point(corner);
+    let next = V2::from_point(&contour.points[neighbor_index(index, count, true, true)]);
+    let in_unit = here.sub(prev).norm();
+    let out_unit = next.sub(here).norm();
+    if in_unit.len() < 1e-8 || out_unit.len() < 1e-8 {
         return None;
     }
-    let turn = dot(in_unit, out_unit).clamp(-1.0, 1.0).acos();
+    let turn = in_unit.dot(out_unit).clamp(-1.0, 1.0).acos();
     if turn < 1e-3 {
         return None;
     }
-    // The grow side is right of travel for a counter-clockwise contour, flipped for a hole.
-    // A left turn bends away from the right side, so the right side is the outside of that turn.
     let cross = in_unit.x * out_unit.y - in_unit.y * out_unit.x;
-    let away_is_outside = (cross > 0.0) == (ccw != hole);
+    // Left turn (cross>0): outside of the turn is the right side.
+    // Grow on the outside when (cross>0) != grow_left.
+    let away_is_outside = (cross > 0.0) != grow_left;
     let shrinking = options.horizontal < 0.0 || options.vertical < 0.0;
     if away_is_outside == shrinking {
         return None;
     }
-    let in_away = edge_away(in_unit, ccw, hole);
-    let out_away = edge_away(out_unit, ccw, hole);
-    let start = v(
+    let in_away = edge_normal(in_unit, grow_left);
+    let out_away = edge_normal(out_unit, grow_left);
+    let start = V2::new(
         here.x + in_away.x * options.horizontal,
         here.y + in_away.y * options.vertical,
     );
-    let end = v(
+    let end = V2::new(
         here.x + out_away.x * options.horizontal,
         here.y + out_away.y * options.vertical,
     );
-    // A cubic approximates a circular arc of this angle when its handles are this long.
-    let radius = (len(sub(start, here)) + len(sub(end, here))) / 2.0;
+    let radius = (start.dist(here) + end.dist(here)) / 2.0;
     let handle = 4.0 / 3.0 * (turn / 4.0).tan() * radius;
-    let first_handle = add(start, mul(in_unit, handle));
-    let second_handle = sub(end, mul(out_unit, handle));
+    let first_handle = start.add(in_unit.mul(handle));
+    let second_handle = end.sub(out_unit.mul(handle));
     Some([
         arc_point(start, PointKind::On),
         arc_point(first_handle, PointKind::Off),
@@ -272,364 +1536,154 @@ fn arc_point(at: V2, kind: PointKind) -> Point {
     }
 }
 
-fn shift_sidebearings(glyph: &mut Glyph, horizontal: f64) {
-    for contour in &mut glyph.contours {
-        for point in &mut contour.points {
-            point.x += horizontal;
-        }
-    }
-    glyph.advance += horizontal * 2.0;
+fn vertical_extremum(points: &[Point], index: usize, closed: bool) -> bool {
+    let count = points.len();
+    let y = points[index].y;
+    let prev = points[neighbor_index(index, count, closed, false)].y;
+    let next = points[neighbor_index(index, count, closed, true)].y;
+    (y >= prev && y >= next) || (y <= prev && y <= next)
 }
 
-#[derive(Clone, Copy)]
-struct V2 {
-    x: f64,
-    y: f64,
-}
-
-fn v(x: f64, y: f64) -> V2 {
-    V2 { x, y }
-}
-
-fn add(a: V2, b: V2) -> V2 {
-    v(a.x + b.x, a.y + b.y)
-}
-
-fn sub(a: V2, b: V2) -> V2 {
-    v(a.x - b.x, a.y - b.y)
-}
-
-fn mul(a: V2, scale: f64) -> V2 {
-    v(a.x * scale, a.y * scale)
-}
-
-fn dot(a: V2, b: V2) -> f64 {
-    a.x * b.x + a.y * b.y
-}
-
-fn len(a: V2) -> f64 {
-    dot(a, a).sqrt()
-}
-
-fn norm(a: V2) -> V2 {
-    let length = len(a);
-    if length < 1e-8 {
-        v(0.0, 0.0)
-    } else {
-        mul(a, 1.0 / length)
-    }
-}
-
-fn from_point(point: &Point) -> V2 {
-    v(point.x, point.y)
-}
-
-fn offset_contour(
-    contour: &Contour,
-    hole: bool,
+/// Points-mode path that also supports `add_points` round joins (structure-changing).
+fn apply_points_with_optional_arcs(
+    glyph: &mut Glyph,
+    source: &Glyph,
     options: &OffsetOptions,
-) -> Result<Vec<Point>, FoundryError> {
-    let count = contour.points.len();
-    if count == 0 {
-        return Ok(Vec::new());
+    metrics: &Metrics,
+    amount_scale: f64,
+    skipped_open: &mut Vec<Value>,
+) -> Result<bool, FoundryError> {
+    if options.add_points && options.corner == Corner::Round {
+        // Legacy path: simple per-point offset then insert arcs (no post_smooth).
+        return apply_add_points(glyph, source, options, metrics, amount_scale, skipped_open);
     }
-    let area = signed_area(&contour.points);
-    let ccw = area >= 0.0;
-    let ax = options.horizontal.abs().max(1e-6);
-    let ay = options.vertical.abs().max(1e-6);
-    // A zero axis is "do not move that way", not a tiny scale. Mixed signs use font space too.
-    let anisotropic = options.horizontal.abs() > 1e-8
-        && options.vertical.abs() > 1e-8
-        && options.horizontal.signum() == options.vertical.signum();
+    apply_points_once(glyph, source, options, metrics, amount_scale, skipped_open)
+}
+
+fn apply_add_points(
+    glyph: &mut Glyph,
+    source: &Glyph,
+    options: &OffsetOptions,
+    metrics: &Metrics,
+    amount_scale: f64,
+    skipped_open: &mut Vec<Value>,
+) -> Result<bool, FoundryError> {
+    let h = options.horizontal * amount_scale;
+    let v = options.vertical * amount_scale;
+    let mut opts = options.clone();
+    opts.horizontal = h;
+    opts.vertical = v;
+    opts.post_smooth = false;
+    opts.smooth_sigma = 0.0;
+    opts.add_points = false;
+    // Move with zones from keep_metrics alias.
+    let zones_active = options.keep_metrics
+        || options.zones.baseline
+        || options.zones.cap_height
+        || options.zones.x_height;
+    apply_points_once(glyph, source, &opts, metrics, 1.0, skipped_open)?;
+    let nesting = contour_nesting(&source.contours);
+    let mut proposed = Vec::with_capacity(glyph.contours.len());
+    for (index, contour) in source.contours.iter().enumerate() {
+        let outer = nesting[index].1;
+        let gl = if contour.closed && contour.points.len() >= 3 {
+            grow_is_left_of_travel(contour, outer)
+        } else {
+            true
+        };
+        if !contour.closed {
+            skipped_open.push(json!({
+                "name": glyph.name,
+                "contour": index,
+                "reason": "open"
+            }));
+            proposed.push(glyph.contours[index].points.clone());
+            continue;
+        }
+        proposed.push(with_round_joins(
+            contour,
+            gl,
+            &opts,
+            &glyph.contours[index].points,
+            zones_active,
+        ));
+    }
+    for (contour, points) in glyph.contours.iter_mut().zip(proposed) {
+        contour.points = points;
+    }
+    Ok(true)
+}
+
+// Patch offset_glyph_points to use apply_points_with_optional_arcs
+// (redefine the call site by replacing the helper used above).
+
+// --- Clean mode ------------------------------------------------------------
+
+fn offset_glyph_clean(
+    glyph: &mut Glyph,
+    source: &Glyph,
+    options: &OffsetOptions,
+    metrics: &Metrics,
+) -> Result<(), FoundryError> {
+    let h = options.horizontal.abs().max(1e-6);
+    let v = options.vertical.abs().max(1e-6);
     let sign = if options.horizontal < 0.0 || options.vertical < 0.0 {
         -1.0
     } else {
         1.0
     };
-    let mut normals = Vec::with_capacity(count);
-    for index in 0..count {
-        let prev = from_point(&contour.points[prev_index(index, count, contour.closed)]);
-        let here = from_point(&contour.points[index]);
-        let next = from_point(&contour.points[next_index(index, count, contour.closed)]);
-        let (p0, p1, p2) = if anisotropic {
-            (
-                v(prev.x / ax, prev.y / ay),
-                v(here.x / ax, here.y / ay),
-                v(next.x / ax, next.y / ay),
-            )
-        } else {
-            (prev, here, next)
-        };
-        normals.push(grow_normal(sub(p1, p0), sub(p2, p1), ccw, hole));
-    }
-    let mut moved = contour.points.clone();
-    for index in 0..count {
-        let here = from_point(&contour.points[index]);
-        let outgoing = normals[index];
-        let mut bisector = outgoing;
-        if len(bisector) < 1e-8 {
-            bisector = normals[prev_index(index, count, contour.closed)];
-        }
-        let support = dot(bisector, outgoing).abs().max(0.25);
-        let miter = match options.corner {
-            Corner::Miter => 1.0 / support,
-            Corner::Round | Corner::Angle => 1.0,
-        };
-        let delta = if anisotropic {
-            v(
-                bisector.x * sign * miter * ax,
-                bisector.y * sign * miter * ay,
-            )
-        } else {
-            v(
-                bisector.x * options.horizontal * miter,
-                bisector.y * options.vertical * miter,
-            )
-        };
-        let mut next = add(here, delta);
-        if options.keep_metrics && vertical_extremum(&contour.points, index, contour.closed) {
-            next.y = here.y;
-        }
-        moved[index].x = next.x;
-        moved[index].y = next.y;
-    }
-    Ok(moved)
-}
+    let nesting = contour_nesting(&glyph.contours);
+    let group = classify(glyph.unicode, false);
+    let zone_ys = zone_lines(metrics, &options.zones, group, glyph);
 
-/// Normal that points into the white, so a positive offset makes the letter bolder.
-fn grow_normal(incoming: V2, outgoing: V2, ccw: bool, hole: bool) -> V2 {
-    let direction = if len(outgoing) >= len(incoming) {
-        outgoing
-    } else {
-        incoming
-    };
-    let unit = norm(direction);
-    if len(unit) < 1e-8 {
-        return v(0.0, 0.0);
-    }
-    let left = v(-unit.y, unit.x);
-    let right = v(unit.y, -unit.x);
-    let away = if ccw { right } else { left };
-    let grow = if hole { mul(away, -1.0) } else { away };
-    // The unit bisector of the two edges. The caller uses this normal as it is.
-    if len(incoming) > 1e-8 && len(outgoing) > 1e-8 {
-        let in_unit = norm(incoming);
-        let out_unit = norm(outgoing);
-        let in_away = edge_away(in_unit, ccw, hole);
-        let out_away = edge_away(out_unit, ccw, hole);
-        let mixed = norm(add(in_away, out_away));
-        if len(mixed) > 1e-8 {
-            return mixed;
-        }
-    }
-    grow
-}
-
-fn edge_away(unit: V2, ccw: bool, hole: bool) -> V2 {
-    let left = v(-unit.y, unit.x);
-    let right = v(unit.y, -unit.x);
-    let away = if ccw { right } else { left };
-    if hole { mul(away, -1.0) } else { away }
-}
-
-fn prev_index(index: usize, count: usize, closed: bool) -> usize {
-    if index > 0 {
-        index - 1
-    } else if closed {
-        count - 1
-    } else {
-        index
-    }
-}
-
-fn next_index(index: usize, count: usize, closed: bool) -> usize {
-    if index + 1 < count {
-        index + 1
-    } else if closed {
-        0
-    } else {
-        index
-    }
-}
-
-fn signed_area(points: &[Point]) -> f64 {
-    if points.len() < 3 {
-        return 0.0;
-    }
-    let mut area = 0.0;
-    for index in 0..points.len() {
-        let here = &points[index];
-        let next = &points[(index + 1) % points.len()];
-        area += here.x * next.y - next.x * here.y;
-    }
-    area * 0.5
-}
-
-fn vertical_extremum(points: &[Point], index: usize, closed: bool) -> bool {
-    let count = points.len();
-    let y = points[index].y;
-    let prev = points[prev_index(index, count, closed)].y;
-    let next = points[next_index(index, count, closed)].y;
-    (y >= prev && y >= next) || (y <= prev && y <= next)
-}
-
-fn hole_flags(contours: &[Contour]) -> Vec<bool> {
-    let centroids: Vec<V2> = contours
-        .iter()
-        .map(|contour| {
-            if contour.points.is_empty() {
-                return v(0.0, 0.0);
-            }
-            let mut sum = v(0.0, 0.0);
-            for point in &contour.points {
-                sum = add(sum, from_point(point));
-            }
-            mul(sum, 1.0 / contour.points.len() as f64)
-        })
-        .collect();
-    contours
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let depth = contours
-                .iter()
-                .enumerate()
-                .filter(|(other, contour)| {
-                    *other != index && point_in_polygon(centroids[index], &contour.points)
-                })
-                .count();
-            depth % 2 == 1
-        })
-        .collect()
-}
-
-fn point_in_polygon(point: V2, polygon: &[Point]) -> bool {
-    if polygon.len() < 3 {
-        return false;
-    }
-    let mut inside = false;
-    let mut previous = polygon.len() - 1;
-    for index in 0..polygon.len() {
-        let a = &polygon[previous];
-        let b = &polygon[index];
-        let crosses = (a.y > point.y) != (b.y > point.y);
-        if crosses {
-            let x = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
-            if point.x < x {
-                inside = !inside;
-            }
-        }
-        previous = index;
-    }
-    inside
-}
-
-fn limit_gaps(original: &[Contour], proposed: &mut [Vec<Point>], gap: f64) {
-    let segments = segments_of(original);
-    for (contour_index, contour) in original.iter().enumerate() {
-        for (point_index, point) in contour.points.iter().enumerate() {
-            let next = &proposed[contour_index][point_index];
-            let delta = v(next.x - point.x, next.y - point.y);
-            let distance = len(delta);
-            if distance < 1e-6 {
-                continue;
-            }
-            let direction = mul(delta, 1.0 / distance);
-            let mut allowed = distance;
-            for segment in &segments {
-                if segment.contour == contour_index
-                    && near_point(segment.start, point_index, contour.points.len())
-                {
-                    continue;
-                }
-                let Some(hit) = distance_toward(from_point(point), direction, segment) else {
-                    continue;
-                };
-                let share = if segment.opposes { 2.0 } else { 1.0 };
-                let room = ((hit - gap) / share).max(0.0);
-                if room < allowed {
-                    allowed = room;
-                }
-            }
-            proposed[contour_index][point_index].x = point.x + direction.x * allowed;
-            proposed[contour_index][point_index].y = point.y + direction.y * allowed;
-        }
-    }
-}
-
-struct Segment {
-    contour: usize,
-    start: usize,
-    a: V2,
-    b: V2,
-    opposes: bool,
-}
-
-fn segments_of(contours: &[Contour]) -> Vec<Segment> {
-    let mut segments = Vec::new();
-    for (contour_index, contour) in contours.iter().enumerate() {
-        let count = contour.points.len();
-        if count < 2 {
+    for (c_index, contour) in glyph.contours.iter_mut().enumerate() {
+        if !contour.closed || contour.points.len() < 3 {
             continue;
         }
-        let last = if contour.closed { count } else { count - 1 };
-        for start in 0..last {
-            let end = (start + 1) % count;
-            let a = from_point(&contour.points[start]);
-            let b = from_point(&contour.points[end]);
-            let direction = norm(sub(b, a));
-            let normal = v(direction.y, -direction.x);
-            segments.push(Segment {
-                contour: contour_index,
-                start,
-                a,
-                b,
-                opposes: len(normal) > 0.0,
+        let outer = nesting[c_index].1;
+        let gl = grow_is_left_of_travel(contour, outer);
+        // Flatten → offset each sample → on-points only.
+        let flat = flatten_contour(contour, 16);
+        let n = if flat.len() > 1 && flat.first() == flat.last() {
+            flat.len() - 1
+        } else {
+            flat.len()
+        };
+        if n < 3 {
+            continue;
+        }
+        let mut moved = Vec::with_capacity(n);
+        for i in 0..n {
+            let prev = flat[(i + n - 1) % n];
+            let here = flat[i];
+            let next = flat[(i + 1) % n];
+            let in_u = here.sub(prev).norm();
+            let out_u = next.sub(here).norm();
+            let nrm = {
+                let a = edge_normal(in_u, gl);
+                let b = edge_normal(out_u, gl);
+                let m = a.add(b).norm();
+                if m.len() > 1e-8 { m } else { a }
+            };
+            let mut p = V2::new(here.x + nrm.x * sign * h, here.y + nrm.y * sign * v);
+            // Zone snap.
+            for &(zone_y, _) in &zone_ys {
+                if (here.y - zone_y).abs() <= options.zones.overshoot {
+                    p.y = zone_y;
+                    break;
+                }
+            }
+            moved.push(Point {
+                x: p.x,
+                y: p.y,
+                kind: PointKind::On,
+                smooth: false,
             });
         }
+        contour.points = moved;
     }
-    // `opposes` is refined per query. The flag stored here means the segment has a normal.
-    segments
-}
-
-fn near_point(segment_start: usize, point: usize, count: usize) -> bool {
-    if count == 0 {
-        return true;
-    }
-    let incoming = if point == 0 { count - 1 } else { point - 1 };
-    segment_start == point || segment_start == incoming
-}
-
-/// Distance along `direction` from `origin` to `segment`, when the segment lies ahead and the
-/// point is moving toward it. `None` when the segment is beside or behind the move.
-fn distance_toward(origin: V2, direction: V2, segment: &Segment) -> Option<f64> {
-    let ab = sub(segment.b, segment.a);
-    let length = len(ab);
-    if length < 1e-8 {
-        return None;
-    }
-    let closest = closest_point(origin, segment.a, segment.b);
-    let toward = sub(closest, origin);
-    let ahead = dot(toward, direction);
-    if ahead <= 1e-4 {
-        return None;
-    }
-    // Ignore a segment we are sliding along rather than approaching.
-    let side = len(sub(toward, mul(direction, ahead)));
-    if side > 1.5 && ahead > side * 4.0 {
-        return None;
-    }
-    Some(ahead)
-}
-
-fn closest_point(point: V2, a: V2, b: V2) -> V2 {
-    let ab = sub(b, a);
-    let length_sq = dot(ab, ab);
-    if length_sq < 1e-12 {
-        return a;
-    }
-    let t = dot(sub(point, a), ab) / length_sq;
-    add(a, mul(ab, t.clamp(0.0, 1.0)))
+    let _ = source;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -698,21 +1752,121 @@ mod tests {
     }
 
     #[test]
+    fn ring_outer_grows_not_shrinks() {
+        let mut font = Font::new("Ring", 1000).unwrap();
+        font.insert_glyph(Glyph {
+            name: "o".into(),
+            unicode: Some(u32::from('o')),
+            advance: 500.0,
+            contours: vec![
+                // Outer, counter-clockwise.
+                Contour {
+                    closed: true,
+                    points: vec![
+                        on(40.0, 0.0),
+                        on(460.0, 0.0),
+                        on(460.0, 500.0),
+                        on(40.0, 500.0),
+                    ],
+                },
+                // Hole, clockwise.
+                Contour {
+                    closed: true,
+                    points: vec![
+                        on(180.0, 100.0),
+                        on(180.0, 400.0),
+                        on(320.0, 400.0),
+                        on(320.0, 100.0),
+                    ],
+                },
+            ],
+        })
+        .unwrap();
+        let before = ink_bounds(font.glyph("o").unwrap());
+        offset_font(
+            &mut font,
+            &OffsetOptions {
+                horizontal: 20.0,
+                vertical: 4.0,
+                keep_metrics: true,
+                ..OffsetOptions::default()
+            },
+        )
+        .unwrap();
+        let after = ink_bounds(font.glyph("o").unwrap());
+        assert!(
+            after.0 < before.0 && after.1 > before.1,
+            "outer should grow in x: before {:?}, after {:?}",
+            before,
+            after
+        );
+    }
+
+    #[test]
+    fn clockwise_outer_still_grows() {
+        let mut font = Font::new("Period", 1000).unwrap();
+        font.insert_glyph(Glyph {
+            name: "period".into(),
+            unicode: Some(u32::from('.')),
+            advance: 200.0,
+            contours: vec![Contour {
+                closed: true,
+                // Clockwise square.
+                points: vec![
+                    on(50.0, 0.0),
+                    on(50.0, 100.0),
+                    on(150.0, 100.0),
+                    on(150.0, 0.0),
+                ],
+            }],
+        })
+        .unwrap();
+        let before = ink_bounds(font.glyph("period").unwrap());
+        offset_font(
+            &mut font,
+            &OffsetOptions {
+                horizontal: 10.0,
+                vertical: 10.0,
+                keep_metrics: false,
+                zones: ZoneOptions::all_off(),
+                post_smooth: false,
+                ..OffsetOptions::default()
+            },
+        )
+        .unwrap();
+        let after = ink_bounds(font.glyph("period").unwrap());
+        let before_w = before.1 - before.0;
+        let after_w = after.1 - after.0;
+        let before_h = before.3 - before.2;
+        let after_h = after.3 - after.2;
+        assert!(
+            after_w > before_w && after_h > before_h,
+            "clockwise outer should grow: before {:?} after {:?}",
+            before,
+            after
+        );
+    }
+
+    #[test]
     fn round_joins_add_arc_points_on_the_outside_only() {
-        // Square (100,0)-(200,0)-(200,700)-(100,700), counter-clockwise. Keep metrics off so the
-        // corners on the baseline and cap height may move.
         let round = |horizontal: f64, vertical: f64, keep_metrics: bool| OffsetOptions {
             horizontal,
             vertical,
             keep_metrics,
             corner: Corner::Round,
             add_points: true,
+            post_smooth: false,
+            smooth_sigma: 0.0,
+            zones: if keep_metrics {
+                ZoneOptions::default()
+            } else {
+                ZoneOptions::all_off()
+            },
             ..OffsetOptions::default()
         };
         let mut font = square_font();
         offset_font(&mut font, &round(5.0, 5.0, false)).unwrap();
         let points = &font.glyph("H").unwrap().contours[0].points;
-        // Four corners, each replaced by two on-curve ends and two off-curve handles.
         assert_eq!(points.len(), 16);
         assert_eq!(
             points.iter().filter(|p| p.kind == PointKind::Off).count(),
@@ -736,17 +1890,14 @@ mod tests {
             assert!(ends.contains(&expected), "missing {expected:?} in {ends:?}");
         }
 
-        // Shrinking the same square opens no gap, so every corner stays sharp.
         let mut shrunk = square_font();
         offset_font(&mut shrunk, &round(-5.0, -5.0, false)).unwrap();
         assert_eq!(shrunk.glyph("H").unwrap().contours[0].points.len(), 4);
 
-        // With keep_metrics, every corner of this box sits on a metric line, so none is rounded.
         let mut kept = square_font();
         offset_font(&mut kept, &round(5.0, 5.0, true)).unwrap();
         assert_eq!(kept.glyph("H").unwrap().contours[0].points.len(), 4);
 
-        // A join that moves on one axis only has no arc, and add_points needs corner round.
         let mut one_axis = square_font();
         offset_font(&mut one_axis, &round(5.0, 0.0, false)).unwrap();
         assert_eq!(one_axis.glyph("H").unwrap().contours[0].points.len(), 4);
@@ -800,6 +1951,10 @@ mod tests {
                 vertical: 0.0,
                 gap: 10.0,
                 keep_metrics: false,
+                zones: ZoneOptions::all_off(),
+                post_smooth: false,
+                smooth_sigma: 0.0,
+                min_gap_ratio: 0.0,
                 ..OffsetOptions::default()
             },
         )
@@ -844,5 +1999,34 @@ mod tests {
             .map(|point| point.x)
             .fold(f64::INFINITY, f64::min);
         assert!(min_x > 100.0, "{min_x}");
+    }
+
+    #[test]
+    fn api_square_keeps_baseline() {
+        let mut font = Font::new("Offset", 1000).unwrap();
+        font.insert_glyph(Glyph {
+            name: "H".into(),
+            unicode: Some(72),
+            advance: 400.0,
+            contours: vec![Contour {
+                closed: true,
+                points: vec![
+                    on(100.0, 0.0),
+                    on(180.0, 0.0),
+                    on(180.0, 120.0),
+                    on(100.0, 120.0),
+                ],
+            }],
+        })
+        .unwrap();
+        let opts = OffsetOptions {
+            horizontal: 15.0,
+            vertical: 4.0,
+            names: Some(vec!["H".into()]),
+            ..Default::default()
+        };
+        offset_font_detailed(&mut font, &opts).unwrap();
+        let y = font.glyph("H").unwrap().contours[0].points[0].y;
+        assert_eq!(y, 0.0, "baseline drifted to {y}");
     }
 }

@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! A stdio MCP server. Every tool is one [`foundry_api::Command`] run on one [`Session`].
 //!
 //! Stdout carries only protocol messages, one JSON object per line. Logs go to the separate
@@ -10,6 +11,14 @@ use serde_json::{Map, Value, json};
 
 pub const SERVER_NAME: &str = "typefoundry";
 pub const SERVER_VERSION: &str = "0.1.0";
+
+/// Version string for `initialize` / logs. Includes git hash when `FOUNDRY_GIT_HASH` is set at build.
+pub fn server_version() -> String {
+    match option_env!("FOUNDRY_GIT_HASH") {
+        Some(hash) if !hash.is_empty() => format!("0.1.0+{hash}"),
+        _ => SERVER_VERSION.to_string(),
+    }
+}
 /// Used when a client's `initialize` does not name a protocol version.
 pub const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -146,6 +155,12 @@ impl Server {
             "decision_list" => "list_decisions",
             "font_critique" => "critique",
             "critique_resolve" => "resolve_critique",
+            "outline_smooth" => "smooth_outlines",
+            "smoothness_check" => "check_smoothness",
+            "glyph_mirror" => "mirror",
+            "glyph_symmetrize" => "symmetrize",
+            "symmetry_check" => "check_symmetry",
+            "glyph_from_mirror" => "glyph_from_mirror",
             other => return Err((INVALID_PARAMS, format!("unknown tool {other}"))),
         };
 
@@ -220,7 +235,11 @@ impl Server {
 
 /// Serve newline-delimited JSON-RPC until `input` ends. Only responses are written to `output`.
 pub fn serve(input: impl BufRead, mut output: impl Write, mut log: impl Write) -> io::Result<()> {
-    writeln!(log, "{SERVER_NAME} MCP server {SERVER_VERSION} on stdio")?;
+    writeln!(
+        log,
+        "{SERVER_NAME} MCP server {} on stdio",
+        server_version()
+    )?;
     let mut server = Server::new();
     for line in input.lines() {
         let line = line?;
@@ -245,7 +264,7 @@ fn initialize(params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+        "serverInfo": { "name": SERVER_NAME, "version": server_version() },
     })
 }
 
@@ -562,19 +581,116 @@ fn tool_list() -> Value {
         },
         {
             "name": "path_offset",
-            "description": "Thicken or thin outlines. horizontal and vertical are separate, so stems can grow more than hairlines. Existing points move and none are added, which keeps the font compatible for blending. add_points with corner round is the one exception: sharp outside corners become arcs, which adds points. keep_metrics leaves the baseline, x-height, and cap height. preview returns the outlines and does not change the font.",
+            "description": "Thicken or thin outlines in points mode (compatible) or clean mode. Uses contour nesting, gap guards, zone pinning, and outline_valid fallback. See geometry-tools-spec.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "horizontal": { "type": "number", "default": 0 },
                     "vertical": { "type": "number", "default": 0 },
-                    "gap": { "type": "number", "default": 0, "description": "Stop growth when edges are this close. 0 disables the limit." },
-                    "corner": { "type": "string", "enum": ["miter", "round", "angle"], "default": "angle" },
+                    "mode": { "type": "string", "enum": ["points", "clean"], "default": "points" },
+                    "gap": { "type": "number", "default": 0 },
+                    "min_gap_ratio": { "type": "number", "default": 0.72 },
+                    "counter_share": { "type": "number", "default": 0.85 },
+                    "corner": { "type": "string", "enum": ["miter", "round", "angle", "keep"], "default": "keep" },
                     "sidebearing": { "type": "boolean", "default": false },
                     "keep_metrics": { "type": "boolean", "default": true },
-                    "add_points": { "type": "boolean", "default": false, "description": "Draw round joins as arcs. Needs corner round. Changes the point count." },
+                    "post_smooth": { "type": "boolean", "default": true },
+                    "italic": { "type": "string", "enum": ["auto", "true", "false"], "default": "auto" },
+                    "add_points": { "type": "boolean", "default": false },
                     "names": { "type": "array", "items": { "type": "string" } },
+                    "family": { "type": "boolean", "default": false },
                     "preview": { "type": "boolean", "default": false }
+                }
+            }
+        },
+        {
+            "name": "outline_smooth",
+            "description": "Remove tangent breaks while keeping point structure. Optional reference font/path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "reference": {},
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "axis_snap": { "type": "boolean", "default": true },
+                    "set_smooth_flags": { "type": "boolean", "default": false },
+                    "italic": { "type": "string", "enum": ["auto", "true", "false"], "default": "auto" },
+                    "family": { "type": "boolean", "default": false },
+                    "preview": { "type": "boolean", "default": false },
+                    "targets": { "type": "array" }
+                }
+            }
+        },
+        {
+            "name": "smoothness_check",
+            "description": "Measure tangent breaks against a reference (or self).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "reference": {},
+                    "threshold": { "type": "number", "default": 1.5 },
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "details": { "type": "boolean", "default": false },
+                    "top": { "type": "integer", "default": 10 }
+                }
+            }
+        },
+        {
+            "name": "glyph_mirror",
+            "description": "Reflect glyphs about a vertical/horizontal/line/angle axis.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "axis": {},
+                    "center": { "type": "string", "default": "advance" },
+                    "keep_direction": { "type": "boolean", "default": true },
+                    "italic": { "type": "string", "enum": ["auto", "true", "false"], "default": "auto" },
+                    "family": { "type": "boolean", "default": false },
+                    "preview": { "type": "boolean", "default": false }
+                }
+            }
+        },
+        {
+            "name": "glyph_symmetrize",
+            "description": "Make glyphs exactly symmetric without changing point count.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "source": { "type": "string", "default": "auto" },
+                    "mode": { "type": "string", "enum": ["auto", "pairs", "fit"], "default": "auto" },
+                    "tolerance": { "type": "number", "default": 20 },
+                    "family": { "type": "boolean", "default": false },
+                    "preview": { "type": "boolean", "default": false }
+                }
+            }
+        },
+        {
+            "name": "symmetry_check",
+            "description": "Measure self-symmetry and optional mirror-pair Hausdorff distances.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "pairs": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+                    "center": { "type": "string", "default": "advance" },
+                    "tolerance": { "type": "number", "default": 8 }
+                }
+            }
+        },
+        {
+            "name": "glyph_from_mirror",
+            "description": "Build a glyph from its mirror or rotate180 partner (or preset brackets/figures).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string" },
+                    "target": { "type": "string" },
+                    "transform": { "type": "string", "enum": ["mirror_x", "mirror_y", "rotate180"], "default": "mirror_x" },
+                    "center": { "type": "string", "default": "advance" },
+                    "replace": { "type": "boolean", "default": false },
+                    "preset": { "type": "string", "enum": ["brackets", "figures"] },
+                    "family": { "type": "boolean", "default": false }
                 }
             }
         },
@@ -874,6 +990,12 @@ mod tests {
         assert!(names.contains(&"point_move"));
         assert!(names.contains(&"points_set"));
         assert!(names.contains(&"path_offset"));
+        assert!(names.contains(&"outline_smooth"));
+        assert!(names.contains(&"smoothness_check"));
+        assert!(names.contains(&"glyph_mirror"));
+        assert!(names.contains(&"glyph_symmetrize"));
+        assert!(names.contains(&"symmetry_check"));
+        assert!(names.contains(&"glyph_from_mirror"));
         assert!(names.contains(&"kern_add"));
         assert!(names.contains(&"font_proof"));
         assert!(names.contains(&"font_measure"));
@@ -882,7 +1004,7 @@ mod tests {
         assert!(names.contains(&"decision_record"));
         assert!(names.contains(&"font_critique"));
         assert!(names.contains(&"critique_resolve"));
-        assert_eq!(names.len(), 46);
+        assert_eq!(names.len(), 52);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }

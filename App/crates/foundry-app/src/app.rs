@@ -572,11 +572,7 @@ impl FoundryWindow {
                 } else {
                     format!("Genome check · {count} issue(s)")
                 },
-                if count == 0 {
-                    Tone::Done
-                } else {
-                    Tone::Quiet
-                },
+                if count == 0 { Tone::Done } else { Tone::Quiet },
             );
         }
     }
@@ -599,11 +595,7 @@ impl FoundryWindow {
                 } else {
                     format!("Audit · {count} issue(s)")
                 },
-                if count == 0 {
-                    Tone::Done
-                } else {
-                    Tone::Quiet
-                },
+                if count == 0 { Tone::Done } else { Tone::Quiet },
             );
             // Refresh ranked critiques alongside the raw audit.
             self.run_critique();
@@ -660,7 +652,10 @@ impl FoundryWindow {
                 id: id.to_string(),
                 accepted,
                 issue: suggestion["issue"].as_str().unwrap_or_default().into(),
-                observation: suggestion["observation"].as_str().unwrap_or_default().into(),
+                observation: suggestion["observation"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
                 intervention: suggestion["intervention"]
                     .as_str()
                     .unwrap_or_default()

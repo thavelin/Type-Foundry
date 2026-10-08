@@ -422,6 +422,13 @@ impl Font {
                 .glyph_mut(name)
                 .ok_or_else(|| FoundryError::MissingGlyph(name.clone()))?;
             scale_glyph_width(glyph, factor);
+            glyph.advance = glyph.advance.round();
+            for contour in &mut glyph.contours {
+                for point in &mut contour.points {
+                    point.x = point.x.round();
+                    point.y = point.y.round();
+                }
+            }
         }
         Ok(targets)
     }
@@ -598,37 +605,44 @@ fn ink_x(glyph: &Glyph) -> (f64, f64) {
     (min_x, max_x)
 }
 
-/// Widths of vertical stems in `glyph`, using the same near-vertical edge clustering as
-/// `scale_width`. Empty when the glyph has fewer than two stem gaps.
+/// Widths of vertical stems in `glyph`, measured by horizontal ray casts through ink runs.
 pub fn glyph_stem_widths(glyph: &Glyph) -> Vec<f64> {
-    let edges = vertical_edges(glyph);
-    if edges.len() < 2 {
+    let (_, _, min_y, max_y) = crate::geometry::ink_bounds(glyph);
+    if !min_y.is_finite() {
         return Vec::new();
     }
-    let mut stems = Vec::new();
-    for index in 0..edges.len() - 1 {
-        if index.is_multiple_of(2) {
-            stems.push(edges[index + 1] - edges[index]);
-        }
-    }
-    stems
+    // Prefer a mid-height zone; callers without font metrics use the ink box.
+    let zone = if max_y > 100.0 { max_y } else { max_y - min_y };
+    crate::geometry::measure_stems_ray(glyph, zone.max(1.0))
 }
 
 fn vertical_edges(glyph: &Glyph) -> Vec<f64> {
+    // Edge positions for scale_width: left/right of each stem from ray-cast runs at mid height.
+    let (_, _, min_y, max_y) = crate::geometry::ink_bounds(glyph);
+    if !min_y.is_finite() {
+        return Vec::new();
+    }
+    let y = min_y + (max_y - min_y) * 0.5;
     let mut xs = Vec::new();
     for contour in &glyph.contours {
-        let count = contour.points.len();
-        if count < 2 {
+        if !contour.closed {
             continue;
         }
-        let segments = if contour.closed { count } else { count - 1 };
-        for index in 0..segments {
-            let start = &contour.points[index];
-            let end = &contour.points[(index + 1) % count];
-            let dx = (end.x - start.x).abs();
-            let dy = (end.y - start.y).abs();
-            if dy >= 8.0 && dy > dx * 4.0 {
-                xs.push((start.x + end.x) / 2.0);
+        let poly = crate::geometry::flatten_contour(contour, 16);
+        let n = if poly.len() > 1 && poly.first() == poly.last() {
+            poly.len() - 1
+        } else {
+            poly.len()
+        };
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            if (a.y > y) == (b.y > y) {
+                continue;
+            }
+            let t = (y - a.y) / (b.y - a.y);
+            if (0.0..=1.0).contains(&t) {
+                xs.push(a.x + (b.x - a.x) * t);
             }
         }
     }

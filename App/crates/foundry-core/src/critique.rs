@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::FoundryError;
 use crate::font::Font;
-use crate::genome::{
-    DesignDecision, GenomeIssue, check_genome, record_decision,
-};
+use crate::genome::{DesignDecision, GenomeIssue, check_genome, record_decision};
 use crate::outline::{OutlineIssue, SpacingIssue, check_outlines, check_spacing};
 
 /// Which audit layer produced the suggestion.
@@ -54,6 +52,7 @@ pub fn critique_font(font: &Font, min_gap: f64) -> Result<Vec<CritiqueSuggestion
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.id.cmp(&b.id))
     });
+    filter_rejected(font, &mut raw);
     for (index, suggestion) in raw.iter_mut().enumerate() {
         suggestion.rank = (index + 1) as u32;
     }
@@ -61,26 +60,95 @@ pub fn critique_font(font: &Font, min_gap: f64) -> Result<Vec<CritiqueSuggestion
 }
 
 /// Record Troy's accept/reject as a DesignDecision on `font.lib`.
+/// Caller-supplied observation/intervention/glyphs/confidence win when non-empty.
 pub fn resolve_critique(
     font: &mut Font,
     suggestion: &CritiqueSuggestion,
     accepted: bool,
 ) -> Result<usize, FoundryError> {
-    record_decision(
+    resolve_critique_with(font, suggestion, accepted, None, None, None, None)
+}
+
+/// Like [`resolve_critique`], with optional caller overrides.
+pub fn resolve_critique_with(
+    font: &mut Font,
+    suggestion: &CritiqueSuggestion,
+    accepted: bool,
+    observation: Option<String>,
+    intervention: Option<String>,
+    glyphs: Option<Vec<String>>,
+    confidence: Option<f64>,
+) -> Result<usize, FoundryError> {
+    let count = record_decision(
         font,
         DesignDecision {
             scope: match suggestion.layer {
                 CritiqueLayer::Design => "design critique".into(),
                 CritiqueLayer::Technical => "technical critique".into(),
             },
-            glyphs: suggestion.glyphs.clone(),
+            glyphs: glyphs.unwrap_or_else(|| suggestion.glyphs.clone()),
             issue: suggestion.issue.clone(),
-            observation: suggestion.observation.clone(),
-            intervention: suggestion.intervention.clone(),
+            observation: observation
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| suggestion.observation.clone()),
+            intervention: intervention
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| suggestion.intervention.clone()),
             accepted,
-            confidence: suggestion.confidence,
+            confidence: confidence.unwrap_or(suggestion.confidence),
         },
-    )
+    )?;
+    // Suppress rejected ids until the glyph changes: store a hash beside decisions.
+    if !accepted {
+        let key = "com.typefoundry.rejectedCritique";
+        let mut rejected: serde_json::Map<String, serde_json::Value> = font
+            .lib
+            .get(key)
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let hash = glyph_hash_for(font, &suggestion.glyphs);
+        rejected.insert(suggestion.id.clone(), serde_json::json!(hash));
+        font.lib
+            .insert(key.to_string(), serde_json::Value::Object(rejected));
+    }
+    Ok(count)
+}
+
+fn glyph_hash_for(font: &Font, glyphs: &[String]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for name in glyphs {
+        if let Some(glyph) = font.glyph(name) {
+            glyph.name.hash(&mut hasher);
+            for contour in &glyph.contours {
+                for point in &contour.points {
+                    point.x.to_bits().hash(&mut hasher);
+                    point.y.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+    }
+    format!("{:x}", hasher.finish())
+}
+
+/// Drop suggestions whose id was rejected and whose glyphs are unchanged.
+pub fn filter_rejected(font: &Font, suggestions: &mut Vec<CritiqueSuggestion>) {
+    let Some(rejected) = font
+        .lib
+        .get("com.typefoundry.rejectedCritique")
+        .and_then(|value| value.as_object())
+    else {
+        return;
+    };
+    suggestions.retain(|suggestion| {
+        let Some(stored) = rejected.get(&suggestion.id).and_then(|v| v.as_str()) else {
+            return true;
+        };
+        let hash = glyph_hash_for(font, &suggestion.glyphs);
+        stored != hash
+    });
 }
 
 fn from_outline(issue: &OutlineIssue) -> CritiqueSuggestion {
@@ -103,8 +171,7 @@ fn from_outline(issue: &OutlineIssue) -> CritiqueSuggestion {
         ),
         "baseline" => (
             0.72,
-            "Sit the glyph on the baseline (or mark the float as intentional later)."
-                .to_string(),
+            "Sit the glyph on the baseline (or mark the float as intentional later).".to_string(),
         ),
         other => (
             0.55,
@@ -148,10 +215,7 @@ fn from_spacing(issue: &SpacingIssue) -> CritiqueSuggestion {
             0.50,
             "Add the missing glyph or drop the pair from the spacing check.".to_string(),
         ),
-        other => (
-            0.50,
-            format!("Review spacing issue `{other}`."),
-        ),
+        other => (0.50, format!("Review spacing issue `{other}`.")),
     };
     let id_glyphs = glyphs.join("+");
     CritiqueSuggestion {
@@ -167,11 +231,7 @@ fn from_spacing(issue: &SpacingIssue) -> CritiqueSuggestion {
 }
 
 fn from_genome(issue: &GenomeIssue) -> CritiqueSuggestion {
-    let glyphs = issue
-        .glyph
-        .clone()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let glyphs = issue.glyph.clone().into_iter().collect::<Vec<_>>();
     let (confidence, intervention) = match issue.code.as_str() {
         "missing_genome" => (
             0.95,
@@ -186,10 +246,7 @@ fn from_genome(issue: &GenomeIssue) -> CritiqueSuggestion {
             "Bring this glyph's primary stem toward the genome median (within tolerance)."
                 .to_string(),
         ),
-        other => (
-            0.60,
-            format!("Address design genome issue `{other}`."),
-        ),
+        other => (0.60, format!("Address design genome issue `{other}`.")),
     };
     CritiqueSuggestion {
         id: format!(

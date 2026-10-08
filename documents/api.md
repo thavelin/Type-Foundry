@@ -203,18 +203,25 @@ Kerning is stored on the font. `None` in the file means a UFO save leaves kernin
 {"op":"set_features","text":"feature liga {\nsub f i by fi;\n} liga;\n"}
 ```
 
-`offset` moves existing points along their normals. With `corner` `round` and `add_points` true, each sharp corner on the outside of a turn becomes an arc of four points, so the point count grows and the result no longer blends with the original. Both amounts must be non-zero for an arc, and with `keep_metrics` a corner on a metric line stays sharp. `horizontal` and `vertical` are separate, so a stem can thicken more than a hairline. The point count does not change, which keeps the result compatible for blending. `keep_metrics` defaults to true and leaves baseline, x-height, cap height, and overshoots where they are. `gap` stops growth where edges already face each other. `corner` is `angle` (the default), `miter`, or `round`. `sidebearing` true shifts the sidebearings by the horizontal amount. `names` limits the edit to those glyphs. `preview` true returns the outlines and does not change the font. `stroke` uses the same offset to build an `outline` or `inline` style. Those add contours, so they do not blend with the original master.
+`offset` (MCP `path_offset`) thickens or thins outlines. Default `mode` is `points`: point count and structure stay identical for blending. Contour nesting classifies outers vs holes; `counter_share` (default 0.85) biases growth into counters; `min_gap_ratio` / `gap_window` keep facing slits open; `outline_valid` retries with amounts ×0.93 and falls back per glyph. `zones` / `keep_metrics` pin baseline, x-height, cap, and glyph extremes. `italic:auto` works in the de-slanted frame. `mode:clean` is a geometric offset (not blend-compatible). `preview` and `family` follow the usual rules. Full field list: `documents/geometry-tools-spec.md`.
 
-`scale_width` changes width and keeps vertical stem thickness. Counters and sidebearings scale. `factor` must be greater than 0 and at most 4.
+`smooth_outlines` / `check_smoothness` (MCP `outline_smooth` / `smoothness_check`) remove or measure tangent breaks while keeping structure. `mirror`, `symmetrize`, `check_symmetry`, and `glyph_from_mirror` cover symmetry (MCP `glyph_mirror`, `glyph_symmetrize`, `symmetry_check`, `glyph_from_mirror`).
+
+`scale_width` changes width and keeps vertical stem thickness (ray-cast stems). Counters and sidebearings scale; advances round. `factor` must be greater than 0 and at most 4. `slant` shears about `pivot_y` (default `x_height/2`) and does not re-centre ink unless `recenter:true`.
 
 ```json
 {"op":"offset","horizontal":18,"vertical":6,"gap":8,"corner":"miter","sidebearing":true}
 {"op":"offset","names":["H"],"horizontal":12,"preview":true}
+{"op":"smooth_outlines","names":["zero","six"]}
+{"op":"check_smoothness","details":true}
+{"op":"mirror","names":["parenleft"],"axis":"vertical"}
+{"op":"glyph_from_mirror","preset":"brackets","replace":true,"family":true}
 {"op":"stroke","kind":"outline","horizontal":16,"vertical":8}
 {"op":"scale_width","factor":0.8}
+{"op":"slant","degrees":10,"pivot_y":250}
 ```
 
-`check_outlines` flags self-intersections, kinks, wrong contour direction, missing overshoot, and glyphs that sit off the baseline or the cap height. `check_spacing` measures sidebearings along the italic slant and flags pairs closer than `min_gap`. `diff` compares two files and names each glyph that changed. A compatibility failure names the glyph, and the contour and point when it has them.
+`check_outlines` uses flattened-outline validity (self-intersections, contour crosses, inverted area) plus kinks, nesting-based direction, round-overshoot, and floating glyphs. `check_spacing` measures in the italic frame on flattened outlines and reports gap sizes. `diff` also reports kerning, features, and info changes.
 
 ```json
 {"op":"check_outlines"}
@@ -305,8 +312,14 @@ Stdout carries only protocol messages, one JSON-RPC object per line. Logs go to 
 | `group_set` | `name`, `members` | `set_group` |
 | `ligature_add` | `glyphs`, `name` | `add_ligature` |
 | `features_set` | `text?` | `set_features` |
-| `path_offset` | `horizontal?`, `vertical?`, `gap?`, `corner?`, `sidebearing?`, `keep_metrics?`, `add_points?`, `names?`, `preview?` | `offset` |
+| `path_offset` | offset fields (`mode`, `counter_share`, `min_gap_ratio`, `zones`, `italic`, `family`, `preview`, …) | `offset` |
 | `path_stroke` | `kind`, plus the offset fields | `stroke` |
+| `outline_smooth` | `reference?`, `names?`, `axis_snap?`, `family?`, `preview?`, … | `smooth_outlines` |
+| `smoothness_check` | `reference?`, `threshold?`, `names?`, `details?` | `check_smoothness` |
+| `glyph_mirror` | `names?`, `axis?`, `center?`, `family?`, `preview?` | `mirror` |
+| `glyph_symmetrize` | `names?`, `source?`, `mode?`, `tolerance?`, `family?` | `symmetrize` |
+| `symmetry_check` | `names?`, `pairs?`, `center?`, `tolerance?` | `check_symmetry` |
+| `glyph_from_mirror` | `source?`, `target?`, `transform?`, `preset?`, `replace?`, `family?` | `glyph_from_mirror` |
 | `sidebearing_set` | `name`, `side`, `value`, `family?` | `set_sidebearing` |
 | `outline_check` | none | `check_outlines` |
 | `spacing_check` | `min_gap?`, `pairs?` | `check_spacing` |
@@ -317,7 +330,7 @@ Stdout carries only protocol messages, one JSON-RPC object per line. Logs go to 
 | `undo` | none | `undo` |
 | `redo` | none | `redo` |
 | `width_scale` | `factor`, `names?` | `scale_width` |
-| `slant` | `degrees` | `slant` |
+| `slant` | `degrees`, `pivot_y?`, `recenter?` | `slant` |
 | `font_measure` | none | `measure` |
 | `genome_capture` | `stem_tolerance?` | `capture_genome` |
 | `genome_check` | none | `check_genome` |

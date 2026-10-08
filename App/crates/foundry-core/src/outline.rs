@@ -3,6 +3,7 @@
 use serde::Serialize;
 
 use crate::font::{Contour, Font, Glyph, Point, PointKind};
+use crate::geometry::{contour_nesting, flatten_contour, outline_valid, signed_area_points};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OutlineIssue {
@@ -26,50 +27,50 @@ pub fn check_outlines(font: &Font) -> Vec<OutlineIssue> {
 
 fn glyph_issues(font: &Font, glyph: &Glyph) -> Vec<OutlineIssue> {
     let mut issues = Vec::new();
-    let mut areas = Vec::new();
     for (index, contour) in glyph.contours.iter().enumerate() {
-        let area = signed_area(contour);
-        areas.push(area);
         issues.extend(kinks(glyph, index, contour));
-        issues.extend(crossings(glyph, index, contour));
     }
-    if let Some((outer, _)) = areas
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
-    {
-        let outer_ccw = areas[outer] >= 0.0;
-        for (index, area) in areas.iter().enumerate() {
-            if index == outer || area.abs() < 1.0 {
-                continue;
-            }
-            let inside = glyph.contours[index]
-                .points
-                .first()
-                .is_some_and(|point| point_in_polygon(point, &glyph.contours[outer].points));
-            if inside && (*area >= 0.0) == outer_ccw {
-                issues.push(issue(
-                    glyph,
-                    Some(index),
-                    None,
-                    "direction",
+    for problem in outline_valid(glyph, None) {
+        issues.push(issue(
+            glyph,
+            problem.contour,
+            None,
+            match problem.code {
+                "self-intersection" | "contour-cross" => "intersection",
+                other => other,
+            },
+            problem.detail,
+        ));
+    }
+    let nesting = contour_nesting(&glyph.contours);
+    for (index, contour) in glyph.contours.iter().enumerate() {
+        if !contour.closed || contour.points.len() < 3 {
+            continue;
+        }
+        let area = signed_area_points(&contour.points);
+        if area.abs() < 1.0 {
+            continue;
+        }
+        let (_, outer) = nesting[index];
+        // Outer contours should be counter-clockwise (positive area); holes clockwise.
+        let expected_positive = outer;
+        if (area > 0.0) != expected_positive {
+            issues.push(issue(
+                glyph,
+                Some(index),
+                None,
+                "direction",
+                if outer {
+                    format!(
+                        "{} contour {index} is clockwise; outer contours are counter-clockwise",
+                        glyph.name
+                    )
+                } else {
                     format!(
                         "{} contour {index} winds the same way as the outer contour",
                         glyph.name
-                    ),
-                ));
-            }
-        }
-        if !outer_ccw {
-            issues.push(issue(
-                glyph,
-                Some(outer),
-                None,
-                "direction",
-                format!(
-                    "{} contour {outer} is clockwise; outer contours are counter-clockwise",
-                    glyph.name
-                ),
+                    )
+                },
             ));
         }
     }
@@ -114,6 +115,7 @@ fn kinks(glyph: &Glyph, index: usize, contour: &Contour) -> Vec<OutlineIssue> {
     issues
 }
 
+#[allow(dead_code)]
 fn crossings(glyph: &Glyph, index: usize, contour: &Contour) -> Vec<OutlineIssue> {
     let samples = sample_contour(contour);
     let mut issues = Vec::new();
@@ -148,40 +150,65 @@ fn crossings(glyph: &Glyph, index: usize, contour: &Contour) -> Vec<OutlineIssue
 
 fn overshoot(font: &Font, glyph: &Glyph) -> Vec<OutlineIssue> {
     let mut issues = Vec::new();
-    let Some(top) = glyph
-        .contours
-        .iter()
-        .flat_map(|contour| contour.points.iter())
-        .map(|point| point.y)
-        .max_by(f64::total_cmp)
-    else {
-        return issues;
-    };
-    let curved = glyph.contours.iter().any(|contour| {
-        contour
-            .points
-            .iter()
-            .any(|point| point.kind == PointKind::Off)
-    });
-    if !curved {
-        return issues;
-    }
-    for metric in [font.metrics.x_height, font.metrics.cap_height] {
-        if (top - metric).abs() <= 0.5 {
-            issues.push(issue(
-                glyph,
-                None,
-                None,
-                "overshoot",
-                format!(
-                    "{} reaches {top:.0}, on a metric line, and its top is a curve",
-                    glyph.name
-                ),
-            ));
+    // Only flag round tops/bottoms: an extremum on a curve with no straight run within 10u.
+    for metric in [font.metrics.x_height, font.metrics.cap_height, 0.0] {
+        if let Some(detail) = round_extreme_on_metric(glyph, metric) {
+            issues.push(issue(glyph, None, None, "overshoot", detail));
             break;
         }
     }
     issues
+}
+
+fn round_extreme_on_metric(glyph: &Glyph, metric: f64) -> Option<String> {
+    for contour in &glyph.contours {
+        if !contour.closed {
+            continue;
+        }
+        let has_curve = contour
+            .points
+            .iter()
+            .any(|point| point.kind == PointKind::Off);
+        if !has_curve {
+            continue;
+        }
+        let poly = flatten_contour(contour, 16);
+        let mut top = f64::NEG_INFINITY;
+        let mut bottom = f64::INFINITY;
+        for p in &poly {
+            top = top.max(p.y);
+            bottom = bottom.min(p.y);
+        }
+        for extreme in [top, bottom] {
+            if (extreme - metric).abs() > 0.5 {
+                continue;
+            }
+            // Straight run within 10u of the extreme → not a round overshoot candidate.
+            let mut straight = false;
+            let n = contour.points.len();
+            for i in 0..n {
+                let a = &contour.points[i];
+                let b = &contour.points[(i + 1) % n];
+                if a.kind != PointKind::On || b.kind != PointKind::On {
+                    continue;
+                }
+                if (a.y - extreme).abs() <= 10.0
+                    && (b.y - extreme).abs() <= 10.0
+                    && (a.y - b.y).abs() <= 0.5
+                {
+                    straight = true;
+                    break;
+                }
+            }
+            if !straight {
+                return Some(format!(
+                    "{} reaches {extreme:.0}, on a metric line, and its extreme is a curve",
+                    glyph.name
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn floating(font: &Font, glyph: &Glyph) -> Vec<OutlineIssue> {
@@ -248,6 +275,7 @@ fn neighbor(index: usize, count: usize, closed: bool, forward: bool) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn signed_area(contour: &Contour) -> f64 {
     let points = &contour.points;
     if points.len() < 3 {
@@ -267,6 +295,7 @@ fn signed_area(contour: &Contour) -> f64 {
     area * 0.5
 }
 
+#[allow(dead_code)]
 fn point_in_polygon(point: &Point, polygon: &[Point]) -> bool {
     if polygon.len() < 3 {
         return false;
@@ -287,6 +316,7 @@ fn point_in_polygon(point: &Point, polygon: &[Point]) -> bool {
     inside
 }
 
+#[allow(dead_code)]
 fn sample_contour(contour: &Contour) -> Vec<(f64, f64)> {
     let points = &contour.points;
     if points.is_empty() {
@@ -338,12 +368,18 @@ pub fn check_spacing(
         ));
     }
     let mut issues = Vec::new();
-    let shear = font.style.italic_angle.to_radians().tan();
+    // Measure in the de-slanted italic frame (pivot at x_height/2), matching geometry §1.2.
+    let shear = if font.style.italic && font.style.italic_angle.abs() > 1e-9 {
+        (-font.style.italic_angle).to_radians().tan()
+    } else {
+        0.0
+    };
+    let pivot_y = font.metrics.x_height / 2.0;
     for glyph in &font.glyphs {
         if glyph.contours.is_empty() {
             continue;
         }
-        let (lsb, rsb) = slant_bearings(glyph, shear);
+        let (lsb, rsb) = slant_bearings_framed(glyph, shear, pivot_y);
         if lsb < min_gap || rsb < min_gap {
             issues.push(SpacingIssue {
                 code: "bearing",
@@ -376,13 +412,14 @@ pub fn check_spacing(
             .find(|(left, right, _)| left == &left_name && right == &right_name)
             .map(|(_, _, value)| *value)
             .unwrap_or(0.0);
-        if pair_gap(left, right, kern) < min_gap {
+        let gap = pair_gap_flat(left, right, kern);
+        if gap < min_gap {
             issues.push(SpacingIssue {
                 code: "collision",
                 left: Some(left_name.clone()),
                 right: Some(right_name),
                 detail: format!(
-                    "{left_name} and the following glyph come closer than {min_gap:.0}"
+                    "{left_name} and the following glyph come {gap:.0} units apart (min {min_gap:.0})"
                 ),
             });
         }
@@ -390,20 +427,42 @@ pub fn check_spacing(
     Ok(issues)
 }
 
-fn slant_bearings(glyph: &Glyph, shear: f64) -> (f64, f64) {
-    let mut min_proj = f64::INFINITY;
-    let mut max_proj = f64::NEG_INFINITY;
-    for point in glyph
-        .contours
-        .iter()
-        .flat_map(|contour| contour.points.iter())
-    {
-        let projected = point.x + point.y * shear;
-        min_proj = min_proj.min(projected);
-        max_proj = max_proj.max(projected);
+fn slant_bearings_framed(glyph: &Glyph, shear: f64, pivot_y: f64) -> (f64, f64) {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    for contour in &glyph.contours {
+        let poly = flatten_contour(contour, 12);
+        for p in poly {
+            let x = p.x - shear * (p.y - pivot_y);
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+        }
     }
-    let right_edge = glyph.advance;
-    (min_proj, right_edge - max_proj)
+    if !min_x.is_finite() {
+        return (0.0, 0.0);
+    }
+    (min_x, glyph.advance - max_x)
+}
+
+fn pair_gap_flat(left: &Glyph, right: &Glyph, kern: f64) -> f64 {
+    let shift = left.advance + kern;
+    let mut best = f64::INFINITY;
+    for lc in &left.contours {
+        let lp = flatten_contour(lc, 12);
+        for rc in &right.contours {
+            let rp = flatten_contour(rc, 12);
+            for i in 0..lp.len().saturating_sub(1) {
+                for j in 0..rp.len().saturating_sub(1) {
+                    let a = (lp[i].x, lp[i].y);
+                    let b = (lp[i + 1].x, lp[i + 1].y);
+                    let c = (rp[j].x + shift, rp[j].y);
+                    let d = (rp[j + 1].x + shift, rp[j + 1].y);
+                    best = best.min(segment_distance((a, b), (c, d)));
+                }
+            }
+        }
+    }
+    best
 }
 
 fn candidate_pairs(font: &Font, min_gap: f64) -> Vec<(String, String)> {
@@ -426,6 +485,7 @@ fn candidate_pairs(font: &Font, min_gap: f64) -> Vec<(String, String)> {
     pairs
 }
 
+#[allow(dead_code)]
 fn pair_gap(left: &Glyph, right: &Glyph, kern: f64) -> f64 {
     let shift = left.advance + kern;
     let left_segments = glyph_segments(left, 0.0);
@@ -439,6 +499,7 @@ fn pair_gap(left: &Glyph, right: &Glyph, kern: f64) -> f64 {
     best
 }
 
+#[allow(dead_code)]
 fn glyph_segments(glyph: &Glyph, shift: f64) -> Vec<((f64, f64), (f64, f64))> {
     let mut segments = Vec::new();
     for contour in &glyph.contours {
