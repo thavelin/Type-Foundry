@@ -14,6 +14,34 @@ pub struct GlyphDiff {
 /// Compare two fonts. Order follows the first font, then glyphs that exist only in the second.
 pub fn diff_fonts(before: &Font, after: &Font) -> Vec<GlyphDiff> {
     let mut diffs = Vec::new();
+    if before.info != after.info {
+        diffs.push(GlyphDiff {
+            name: String::new(),
+            change: "info",
+            detail: "font info fields differ".into(),
+        });
+    }
+    if before.metrics != after.metrics {
+        diffs.push(GlyphDiff {
+            name: String::new(),
+            change: "metrics",
+            detail: "font metrics differ".into(),
+        });
+    }
+    if before.features != after.features {
+        diffs.push(GlyphDiff {
+            name: String::new(),
+            change: "features",
+            detail: "OpenType feature text differs".into(),
+        });
+    }
+    if before.kerning != after.kerning {
+        diffs.push(GlyphDiff {
+            name: String::new(),
+            change: "kerning",
+            detail: "kerning pairs or groups differ".into(),
+        });
+    }
     for glyph in &before.glyphs {
         let Some(other) = after.glyph(&glyph.name) else {
             diffs.push(GlyphDiff {

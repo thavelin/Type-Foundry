@@ -34,6 +34,11 @@ fn run(cli: args::Cli) -> Result<ExitCode, String> {
             print!("{}", args::help_text());
             Ok(ExitCode::SUCCESS)
         }
+        args::Cli::Version => {
+            let hash = option_env!("FOUNDRY_GIT_HASH").unwrap_or("unknown");
+            println!("foundry 0.1.0 ({hash})");
+            Ok(ExitCode::SUCCESS)
+        }
         args::Cli::New {
             name,
             upm,

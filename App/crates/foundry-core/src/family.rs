@@ -146,17 +146,31 @@ impl Font {
             ..StyleUpdate::default()
         })?;
         if leaning {
-            derived.slant_glyphs(slant)?;
+            derived.slant_glyphs_ex(slant, derived.metrics.x_height / 2.0, false)?;
         }
         Ok(derived)
     }
 
-    /// Shear every glyph about the baseline, then shift it so the ink stays centred in its advance.
+    /// Shear every glyph about `pivot_y`. When `recenter` is true, shift ink back to the advance
+    /// centre (legacy behaviour). Production italics use `recenter: false` and `pivot_y` at
+    /// `x_height / 2`.
     pub fn slant_glyphs(&mut self, degrees: f64) -> Result<(), FoundryError> {
+        self.slant_glyphs_ex(degrees, self.metrics.x_height / 2.0, false)
+    }
+
+    pub fn slant_glyphs_ex(
+        &mut self,
+        degrees: f64,
+        pivot_y: f64,
+        recenter: bool,
+    ) -> Result<(), FoundryError> {
         if !degrees.is_finite() || degrees.abs() >= 60.0 {
             return Err(FoundryError::Style(format!(
                 "slant {degrees} must be between -60 and 60 degrees"
             )));
+        }
+        if !pivot_y.is_finite() {
+            return Err(FoundryError::NonFinite);
         }
         if degrees == 0.0 {
             return Ok(());
@@ -166,10 +180,10 @@ impl Font {
             let before = ink_center_x(glyph);
             for contour in &mut glyph.contours {
                 for point in &mut contour.points {
-                    point.x += point.y * shear;
+                    point.x += (point.y - pivot_y) * shear;
                 }
             }
-            if let (Some(before), Some(after)) = (before, ink_center_x(glyph)) {
+            if recenter && let (Some(before), Some(after)) = (before, ink_center_x(glyph)) {
                 let dx = before - after;
                 for contour in &mut glyph.contours {
                     for point in &mut contour.points {
@@ -183,7 +197,16 @@ impl Font {
 
     /// Slant the open font in place, mark it italic, and store the new italic angle.
     pub fn slant(&mut self, degrees: f64) -> Result<(), FoundryError> {
-        self.slant_glyphs(degrees)?;
+        self.slant_ex(degrees, self.metrics.x_height / 2.0, false)
+    }
+
+    pub fn slant_ex(
+        &mut self,
+        degrees: f64,
+        pivot_y: f64,
+        recenter: bool,
+    ) -> Result<(), FoundryError> {
+        self.slant_glyphs_ex(degrees, pivot_y, recenter)?;
         if degrees != 0.0 {
             self.style.italic = true;
             self.style.italic_angle -= degrees;
@@ -440,11 +463,15 @@ pub fn copy_family(
         }
     }
     fs::create_dir_all(dest_dir).map_err(|err| FoundryError::Io(err.to_string()))?;
-    let file_name = source
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_else(|| "family.json".into());
-    let dest = dest_dir.join(file_name);
+    let family_label = fonts
+        .first()
+        .map(|font| font.style.family.clone())
+        .unwrap_or_else(|| "family".into());
+    let safe: String = family_label
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let dest = dest_dir.join(format!("{safe}.family.json"));
     let refs: Vec<&Font> = fonts.iter().collect();
     let stored_label = label
         .map(str::trim)
@@ -564,11 +591,15 @@ mod tests {
         assert_eq!(italic.name, "Wide Italic");
         assert!(italic.style.italic);
         assert_eq!(italic.style.italic_angle, -12.0);
+        // Shear about x_height/2 without re-centring ink (geometry §1.2 / F7).
+        let pivot = upright.metrics.x_height / 2.0;
+        let shear = 12f64.to_radians().tan();
         let top = italic.glyph("H").unwrap().contours[0].points[2].x;
         let bottom = italic.glyph("H").unwrap().contours[0].points[0].x;
-        let lean = 700.0 * 12f64.to_radians().tan();
-        assert!((top - (200.0 + lean / 2.0)).abs() < 1e-6, "{top}");
-        assert!((bottom - (100.0 - lean / 2.0)).abs() < 1e-6, "{bottom}");
+        let expected_top = 200.0 + (700.0 - pivot) * shear;
+        let expected_bottom = 100.0 + (0.0 - pivot) * shear;
+        assert!((top - expected_top).abs() < 1e-6, "{top}");
+        assert!((bottom - expected_bottom).abs() < 1e-6, "{bottom}");
         assert_eq!(italic.legacy_names(), ("Wide".into(), "Italic".into()));
         assert!(upright.derive_style("Back", None, None, 75.0).is_err());
 

@@ -251,12 +251,8 @@ impl FoundryWindow {
             ui.strong(format!(
                 "Critique · showing {shown} of {total} (by confidence)"
             ));
-            let suggestions: Vec<Value> = self
-                .critique_suggestions
-                .iter()
-                .take(15)
-                .cloned()
-                .collect();
+            let suggestions: Vec<Value> =
+                self.critique_suggestions.iter().take(15).cloned().collect();
             egui::ScrollArea::vertical()
                 .id_salt("genome_critique_list")
                 .max_height(220.0)
@@ -268,8 +264,7 @@ impl FoundryWindow {
                         let layer = suggestion["layer"].as_str().unwrap_or("design");
                         let issue = suggestion["issue"].as_str().unwrap_or_default();
                         let observation = suggestion["observation"].as_str().unwrap_or_default();
-                        let intervention =
-                            suggestion["intervention"].as_str().unwrap_or_default();
+                        let intervention = suggestion["intervention"].as_str().unwrap_or_default();
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
                             ui.colored_label(color(AMBER), format!("#{rank}"));
@@ -579,7 +574,10 @@ fn genome_audit_body(ui: &mut egui::Ui, report: &Value) {
         .as_u64()
         .unwrap_or(technical_count + design_count);
     if total == 0 {
-        ui.colored_label(color(SIGNAL), "Audit clean — no technical or design issues.");
+        ui.colored_label(
+            color(SIGNAL),
+            "Audit clean — no technical or design issues.",
+        );
         return;
     }
     ui.colored_label(
@@ -593,10 +591,7 @@ fn genome_audit_body(ui: &mut egui::Ui, report: &Value) {
             if let Some(outlines) = report["technical"]["outlines"].as_array() {
                 for issue in outlines {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(
-                            color(ALERT),
-                            issue["code"].as_str().unwrap_or("outline"),
-                        );
+                        ui.colored_label(color(ALERT), issue["code"].as_str().unwrap_or("outline"));
                         if let Some(glyph) = issue["glyph"].as_str() {
                             ui.strong(glyph);
                         }
@@ -607,10 +602,7 @@ fn genome_audit_body(ui: &mut egui::Ui, report: &Value) {
             if let Some(spacing) = report["technical"]["spacing"].as_array() {
                 for issue in spacing {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(
-                            color(AMBER),
-                            issue["code"].as_str().unwrap_or("spacing"),
-                        );
+                        ui.colored_label(color(AMBER), issue["code"].as_str().unwrap_or("spacing"));
                         ui.label(issue["detail"].as_str().unwrap_or_default());
                     });
                 }
@@ -621,10 +613,7 @@ fn genome_audit_body(ui: &mut egui::Ui, report: &Value) {
             if let Some(issues) = design {
                 for issue in issues {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(
-                            color(AMBER),
-                            issue["code"].as_str().unwrap_or("design"),
-                        );
+                        ui.colored_label(color(AMBER), issue["code"].as_str().unwrap_or("design"));
                         if let Some(glyph) = issue["glyph"].as_str() {
                             ui.strong(glyph);
                         }

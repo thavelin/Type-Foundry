@@ -3,13 +3,15 @@
 use std::path::Path;
 
 use foundry_core::{
-    Anchor, Contour, Corner, CritiqueLayer, CritiqueSuggestion, DesignDecision, ExportFormat,
-    Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix, MetricsUpdate, OffsetOptions,
-    PointKind, ProofOptions, Side, StrokeKind, StyleUpdate, audit_font, blend_fonts,
-    capture_genome, check_family, check_genome, check_outlines, check_spacing, classify,
-    compatibility, copy_family, critique_font, diff_fonts, export_family, list_decisions,
-    load_family, measure_font, offset_font, record_decision, resolve_critique, save_family,
-    stored_genome, stroke_font, write_proof,
+    Anchor, AxisSpec, Contour, Corner, CritiqueLayer, CritiqueSuggestion, DesignDecision,
+    ExportFormat, Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix, MetricsUpdate,
+    MirrorOptions, OffsetMode, OffsetOptions, PointKind, ProofOptions, Side, SmoothOptions,
+    SmoothTarget, StrokeKind, StyleUpdate, SymmetrizeOptions, ZoneOptions, audit_font, blend_fonts,
+    capture_genome, check_family, check_genome, check_outlines, check_smoothness, check_spacing,
+    check_symmetry, classify, compatibility, copy_family, critique_font, diff_fonts, export_family,
+    glyph_from_mirror, list_decisions, load_family, measure_font, mirror_glyphs,
+    offset_font_detailed, record_decision, resolve_critique_with, save_family, smooth_outlines,
+    stored_genome, stroke_font, symmetrize_glyphs, write_proof,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -274,14 +276,38 @@ pub enum Command {
         sidebearing: bool,
         #[serde(default = "default_true")]
         keep_metrics: bool,
-        /// Insert arc points at round joins. Needs `corner: round`.
         #[serde(default)]
         add_points: bool,
         #[serde(default)]
         names: Option<Vec<String>>,
-        /// Return the moved outlines and leave the open font alone.
         #[serde(default)]
         preview: bool,
+        #[serde(default)]
+        mode: OffsetMode,
+        #[serde(default)]
+        zones: Option<ZoneOptions>,
+        #[serde(default = "default_counter_share")]
+        counter_share: f64,
+        #[serde(default = "default_min_gap_ratio")]
+        min_gap_ratio: f64,
+        #[serde(default = "default_gap_window")]
+        gap_window: f64,
+        #[serde(default = "default_miter_limit")]
+        miter_limit: f64,
+        #[serde(default = "default_smooth_sigma")]
+        smooth_sigma: f64,
+        #[serde(default = "default_true")]
+        post_smooth: bool,
+        #[serde(default = "default_italic")]
+        italic: String,
+        #[serde(default = "default_true")]
+        round: bool,
+        #[serde(default)]
+        points: Option<Vec<[usize; 2]>>,
+        #[serde(default)]
+        contours: Option<Vec<usize>>,
+        #[serde(default)]
+        family: bool,
     },
     Stroke {
         kind: StrokeKind,
@@ -357,6 +383,10 @@ pub enum Command {
     },
     Slant {
         degrees: f64,
+        #[serde(default)]
+        pivot_y: Option<f64>,
+        #[serde(default)]
+        recenter: bool,
     },
     ScaleWidth {
         factor: f64,
@@ -420,10 +450,194 @@ pub enum Command {
         #[serde(default)]
         layer: String,
     },
+    CheckSmoothness {
+        #[serde(default)]
+        reference: Option<Value>,
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(default = "default_smooth_threshold")]
+        threshold: f64,
+        #[serde(default = "default_curve_threshold")]
+        curve_threshold: f64,
+        #[serde(default = "default_line_threshold")]
+        line_threshold: f64,
+        #[serde(default = "default_keep_bend")]
+        keep_bend: f64,
+        #[serde(default)]
+        details: bool,
+        #[serde(default = "default_top")]
+        top: usize,
+    },
+    SmoothOutlines {
+        #[serde(default)]
+        reference: Option<Value>,
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(default)]
+        contours: Option<Vec<usize>>,
+        #[serde(default = "default_true")]
+        axis_snap: bool,
+        #[serde(default)]
+        set_smooth_flags: bool,
+        #[serde(default = "default_italic")]
+        italic: String,
+        #[serde(default = "default_true")]
+        round: bool,
+        #[serde(default)]
+        family: bool,
+        #[serde(default)]
+        preview: bool,
+        #[serde(default)]
+        targets: Vec<SmoothTarget>,
+    },
+    Mirror {
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(default)]
+        axis: Option<Value>,
+        #[serde(default = "default_center_advance")]
+        center: String,
+        #[serde(default = "default_true")]
+        keep_direction: bool,
+        #[serde(default = "default_italic")]
+        italic: String,
+        #[serde(default = "default_advance_keep")]
+        advance: String,
+        #[serde(default = "default_true")]
+        round: bool,
+        #[serde(default)]
+        points: Option<Vec<[usize; 2]>>,
+        #[serde(default)]
+        contours: Option<Vec<usize>>,
+        #[serde(default)]
+        family: bool,
+        #[serde(default)]
+        preview: bool,
+    },
+    Symmetrize {
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(default)]
+        axis: Option<Value>,
+        #[serde(default = "default_source_auto")]
+        source: String,
+        #[serde(default = "default_mode_auto")]
+        mode: String,
+        #[serde(default = "default_sym_tolerance")]
+        tolerance: f64,
+        #[serde(default = "default_max_fit_error")]
+        max_fit_error: f64,
+        #[serde(default = "default_italic")]
+        italic: String,
+        #[serde(default)]
+        family: bool,
+        #[serde(default)]
+        preview: bool,
+        #[serde(default = "default_center_ink")]
+        center: String,
+    },
+    CheckSymmetry {
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(default)]
+        pairs: Option<Vec<[String; 2]>>,
+        #[serde(default = "default_center_advance")]
+        center: String,
+        #[serde(default = "default_sym_check_tol")]
+        tolerance: f64,
+        #[serde(default = "default_italic")]
+        italic: String,
+    },
+    GlyphFromMirror {
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default = "default_mirror_x")]
+        transform: String,
+        #[serde(default = "default_center_advance")]
+        center: String,
+        #[serde(default = "default_advance_source")]
+        advance: String,
+        #[serde(default)]
+        replace: bool,
+        #[serde(default)]
+        preset: Option<String>,
+        #[serde(default = "default_italic")]
+        italic: String,
+        #[serde(default)]
+        family: bool,
+        #[serde(default)]
+        unicode: Option<u32>,
+    },
 }
 
 fn default_stem_tolerance() -> f64 {
     4.0
+}
+
+fn default_counter_share() -> f64 {
+    0.85
+}
+fn default_min_gap_ratio() -> f64 {
+    0.72
+}
+fn default_gap_window() -> f64 {
+    60.0
+}
+fn default_miter_limit() -> f64 {
+    2.0
+}
+fn default_smooth_sigma() -> f64 {
+    10.0
+}
+fn default_italic() -> String {
+    "auto".into()
+}
+fn default_smooth_threshold() -> f64 {
+    1.5
+}
+fn default_curve_threshold() -> f64 {
+    6.0
+}
+fn default_line_threshold() -> f64 {
+    8.0
+}
+fn default_keep_bend() -> f64 {
+    2.5
+}
+fn default_top() -> usize {
+    10
+}
+fn default_center_advance() -> String {
+    "advance".into()
+}
+fn default_center_ink() -> String {
+    "ink".into()
+}
+fn default_advance_keep() -> String {
+    "keep".into()
+}
+fn default_advance_source() -> String {
+    "source".into()
+}
+fn default_source_auto() -> String {
+    "auto".into()
+}
+fn default_mode_auto() -> String {
+    "auto".into()
+}
+fn default_sym_tolerance() -> f64 {
+    20.0
+}
+fn default_max_fit_error() -> f64 {
+    1.0
+}
+fn default_sym_check_tol() -> f64 {
+    8.0
+}
+fn default_mirror_x() -> String {
+    "mirror_x".into()
 }
 
 fn default_upm() -> u16 {
@@ -466,7 +680,15 @@ impl Command {
         match self {
             Self::SetSidebearing { family: true, .. }
             | Self::Offset { preview: true, .. }
-            | Self::Stroke { preview: true, .. } => false,
+            | Self::Offset { family: true, .. }
+            | Self::Stroke { preview: true, .. }
+            | Self::SmoothOutlines { preview: true, .. }
+            | Self::SmoothOutlines { family: true, .. }
+            | Self::Mirror { preview: true, .. }
+            | Self::Mirror { family: true, .. }
+            | Self::Symmetrize { preview: true, .. }
+            | Self::Symmetrize { family: true, .. }
+            | Self::GlyphFromMirror { family: true, .. } => false,
             Self::PutGlyph { .. }
             | Self::SetAdvance { .. }
             | Self::MovePoint { .. }
@@ -501,7 +723,11 @@ impl Command {
             | Self::ScaleWidth { .. }
             | Self::CaptureGenome { .. }
             | Self::RecordDecision { .. }
-            | Self::ResolveCritique { .. } => true,
+            | Self::ResolveCritique { .. }
+            | Self::SmoothOutlines { .. }
+            | Self::Mirror { .. }
+            | Self::Symmetrize { .. }
+            | Self::GlyphFromMirror { .. } => true,
             _ => false,
         }
     }
@@ -726,14 +952,55 @@ impl Session {
         kind: Option<StrokeKind>,
         preview: bool,
     ) -> Result<Option<Value>, Fail> {
+        if options.family && kind.is_none() {
+            let targets = self.family_ids(None)?;
+            if targets.is_empty() {
+                return Err(FoundryError::Family("there are no styles to edit".into()).into());
+            }
+            if !preview {
+                self.remember_undo(&targets);
+            }
+            let mut reports = Vec::new();
+            for id in targets {
+                let font = self.font_mut_id(id)?;
+                if preview {
+                    let mut copy = font.clone();
+                    let report = offset_font_detailed(&mut copy, &options)?;
+                    reports.push(json!({ "id": id, "report": report }));
+                } else {
+                    let report = offset_font_detailed(font, &options)?;
+                    reports.push(json!({ "id": id, "report": report }));
+                }
+            }
+            return Ok(Some(json!({ "styles": reports })));
+        }
         if preview {
             let mut copy = self.font().ok_or(FoundryError::NoFont)?.clone();
-            let changed = apply_offset(&mut copy, &options, kind)?;
-            return Ok(Some(preview_glyphs(&copy, &changed)));
+            if let Some(kind) = kind {
+                let changed = stroke_font(&mut copy, &options, kind)?;
+                return Ok(Some(preview_glyphs(&copy, &changed)));
+            }
+            let report = offset_font_detailed(&mut copy, &options)?;
+            let mut data = serde_json::to_value(&report).unwrap_or(json!({}));
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("preview".into(), json!(true));
+                let glyphs: Vec<Value> = report
+                    .changed
+                    .iter()
+                    .filter_map(|name| copy.glyph(name))
+                    .filter_map(|glyph| serde_json::to_value(glyph).ok())
+                    .collect();
+                obj.insert("glyphs".into(), json!(glyphs));
+            }
+            return Ok(Some(data));
         }
         let font = self.font_mut().ok_or(FoundryError::NoFont)?;
-        let changed = apply_offset(font, &options, kind)?;
-        Ok(Some(json!({ "glyphs": changed })))
+        if let Some(kind) = kind {
+            let changed = stroke_font(font, &options, kind)?;
+            return Ok(Some(json!({ "glyphs": changed })));
+        }
+        let report = offset_font_detailed(font, &options)?;
+        Ok(Some(serde_json::to_value(report).unwrap_or(json!({}))))
     }
 
     fn set_sidebearing(
@@ -1192,8 +1459,20 @@ impl Session {
                 let (file, members) = load_family(Path::new(&path))?;
                 let mut opened = Vec::new();
                 for (member, font) in members {
-                    let id = self.add_font(font, false);
-                    opened.push(json!({ "id": id, "path": member.to_string_lossy() }));
+                    let member_path = member.to_string_lossy().replace('\\', "/");
+                    let reused = self
+                        .docs
+                        .iter()
+                        .find(|doc| {
+                            doc.font.style.family == font.style.family
+                                && doc.font.style.name == font.style.name
+                        })
+                        .map(|doc| doc.id);
+                    let id = match reused {
+                        Some(id) => id,
+                        None => self.add_font(font, false),
+                    };
+                    opened.push(json!({ "id": id, "path": member_path }));
                 }
                 if let Some(first) = opened.first().and_then(|entry| entry["id"].as_u64()) {
                     self.active = u32::try_from(first).ok();
@@ -1294,8 +1573,21 @@ impl Session {
                 add_points,
                 names,
                 preview,
+                mode,
+                zones,
+                counter_share,
+                min_gap_ratio,
+                gap_window,
+                miter_limit,
+                smooth_sigma,
+                post_smooth,
+                italic,
+                round,
+                points,
+                contours,
+                family,
             } => self.offset(
-                OffsetOptions {
+                OffsetOptions::from_parts(
                     horizontal,
                     vertical,
                     gap,
@@ -1304,7 +1596,21 @@ impl Session {
                     keep_metrics,
                     add_points,
                     names,
-                },
+                    mode,
+                    zones,
+                    counter_share,
+                    min_gap_ratio,
+                    gap_window,
+                    miter_limit,
+                    smooth_sigma,
+                    post_smooth,
+                    &italic,
+                    round,
+                    points.map(|pts| pts.into_iter().map(|[c, p]| (c, p)).collect()),
+                    contours,
+                    family,
+                    preview,
+                ),
                 None,
                 preview,
             ),
@@ -1329,6 +1635,7 @@ impl Session {
                     keep_metrics,
                     add_points,
                     names,
+                    ..OffsetOptions::default()
                 },
                 Some(kind),
                 preview,
@@ -1432,26 +1739,53 @@ impl Session {
                 layer,
             } => {
                 let font = self.font_mut().ok_or(FoundryError::NoFont)?;
-                // Prefer a live match by id so confidence/text stay in sync with the audit.
                 let live = critique_font(font, 0.0)?;
-                let suggestion = live
-                    .into_iter()
-                    .find(|item| item.id == id)
-                    .unwrap_or(CritiqueSuggestion {
-                        id: id.clone(),
-                        rank: 0,
-                        confidence,
-                        layer: if layer.eq_ignore_ascii_case("technical") {
-                            CritiqueLayer::Technical
-                        } else {
-                            CritiqueLayer::Design
-                        },
-                        issue,
-                        observation,
-                        intervention,
-                        glyphs,
-                    });
-                let count = resolve_critique(font, &suggestion, accepted)?;
+                let suggestion =
+                    live.into_iter()
+                        .find(|item| item.id == id)
+                        .unwrap_or(CritiqueSuggestion {
+                            id: id.clone(),
+                            rank: 0,
+                            confidence,
+                            layer: if layer.eq_ignore_ascii_case("technical") {
+                                CritiqueLayer::Technical
+                            } else {
+                                CritiqueLayer::Design
+                            },
+                            issue: if issue.is_empty() { id.clone() } else { issue },
+                            observation: observation.clone(),
+                            intervention: intervention.clone(),
+                            glyphs: glyphs.clone(),
+                        });
+                let obs = if observation.is_empty() {
+                    None
+                } else {
+                    Some(observation)
+                };
+                let interven = if intervention.is_empty() {
+                    None
+                } else {
+                    Some(intervention)
+                };
+                let glyphs_opt = if glyphs.is_empty() {
+                    None
+                } else {
+                    Some(glyphs)
+                };
+                let conf = if confidence == 0.0 {
+                    None
+                } else {
+                    Some(confidence)
+                };
+                let count = resolve_critique_with(
+                    font,
+                    &suggestion,
+                    accepted,
+                    obs,
+                    interven,
+                    glyphs_opt,
+                    conf,
+                )?;
                 Ok(Some(json!({
                     "id": id,
                     "accepted": accepted,
@@ -1515,18 +1849,289 @@ impl Session {
                 )?;
                 Ok(Some(json!({ "path": written })))
             }
-            Command::Slant { degrees } => {
+            Command::Slant {
+                degrees,
+                pivot_y,
+                recenter,
+            } => {
                 let font = self.font_mut().ok_or(FoundryError::NoFont)?;
-                font.slant(degrees)?;
+                let pivot = pivot_y.unwrap_or(font.metrics.x_height / 2.0);
+                font.slant_ex(degrees, pivot, recenter)?;
                 Ok(Some(json!({
                     "italic": font.style.italic,
                     "italic_angle": font.style.italic_angle,
+                    "pivot_y": pivot,
+                    "recenter": recenter,
                 })))
             }
             Command::ScaleWidth { factor, names } => {
                 let font = self.font_mut().ok_or(FoundryError::NoFont)?;
                 let changed = font.scale_width(factor, names.as_deref())?;
                 Ok(Some(json!({ "glyphs": changed, "factor": factor })))
+            }
+            Command::CheckSmoothness {
+                reference,
+                names,
+                threshold,
+                curve_threshold,
+                line_threshold,
+                keep_bend,
+                details,
+                top,
+            } => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let loaded;
+                let ref_font = match reference {
+                    None => None,
+                    Some(Value::String(path)) => {
+                        loaded = Font::load(Path::new(&path))?;
+                        Some(&loaded)
+                    }
+                    Some(Value::Object(map)) => {
+                        let id = map.get("font").and_then(Value::as_u64).ok_or_else(|| {
+                            FoundryError::Edit("reference.font must be an open font id".into())
+                        })?;
+                        Some(self.font_by(Some(id as u32))?)
+                    }
+                    Some(_) => {
+                        return Err(FoundryError::Edit(
+                            "reference must be a path or {\"font\":id}".into(),
+                        )
+                        .into());
+                    }
+                };
+                let report = check_smoothness(
+                    font,
+                    ref_font,
+                    names.as_deref(),
+                    threshold,
+                    curve_threshold,
+                    line_threshold,
+                    keep_bend,
+                    details,
+                    top,
+                )?;
+                Ok(Some(serde_json::to_value(report).unwrap_or(json!({}))))
+            }
+            Command::SmoothOutlines {
+                reference,
+                names,
+                contours,
+                axis_snap,
+                set_smooth_flags,
+                italic,
+                round,
+                family,
+                preview,
+                targets,
+            } => {
+                let options = SmoothOptions {
+                    names,
+                    contours,
+                    axis_snap,
+                    set_smooth_flags,
+                    italic: foundry_core::ItalicMode::from_field(&italic),
+                    round,
+                    family,
+                    preview,
+                    targets,
+                    ..SmoothOptions::default()
+                };
+                if family {
+                    let targets = self.family_ids(None)?;
+                    if !preview {
+                        self.remember_undo(&targets);
+                    }
+                    let mut reports = Vec::new();
+                    for id in targets {
+                        let font = self.font_mut_id(id)?;
+                        if preview {
+                            let mut copy = font.clone();
+                            let data = smooth_outlines(&mut copy, None, &options)?;
+                            reports.push(json!({ "id": id, "data": data }));
+                        } else {
+                            let data = smooth_outlines(font, None, &options)?;
+                            reports.push(json!({ "id": id, "data": data }));
+                        }
+                    }
+                    return Ok(Some(json!({ "styles": reports })));
+                }
+                if preview {
+                    let mut copy = self.font().ok_or(FoundryError::NoFont)?.clone();
+                    let data = smooth_outlines(&mut copy, None, &options)?;
+                    return Ok(Some(json!({ "preview": true, "data": data })));
+                }
+                let _ = reference;
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                let data = smooth_outlines(font, None, &options)?;
+                Ok(Some(data))
+            }
+            Command::Mirror {
+                names,
+                axis,
+                center,
+                keep_direction,
+                italic,
+                advance,
+                round,
+                points,
+                contours,
+                family,
+                preview,
+            } => {
+                let axis = parse_axis(axis)?;
+                let options = MirrorOptions {
+                    names,
+                    axis,
+                    center,
+                    keep_direction,
+                    italic: foundry_core::ItalicMode::from_field(&italic),
+                    advance,
+                    round,
+                    points: points.map(|pts| pts.into_iter().map(|[c, p]| (c, p)).collect()),
+                    contours,
+                    family,
+                    preview,
+                };
+                if family {
+                    let targets = self.family_ids(None)?;
+                    if !preview {
+                        self.remember_undo(&targets);
+                    }
+                    let mut reports = Vec::new();
+                    for id in targets {
+                        let font = self.font_mut_id(id)?;
+                        if preview {
+                            let mut copy = font.clone();
+                            reports.push(mirror_glyphs(&mut copy, &options)?);
+                        } else {
+                            reports.push(mirror_glyphs(font, &options)?);
+                        }
+                    }
+                    return Ok(Some(json!({ "styles": reports })));
+                }
+                if preview {
+                    let mut copy = self.font().ok_or(FoundryError::NoFont)?.clone();
+                    let data = mirror_glyphs(&mut copy, &options)?;
+                    return Ok(Some(json!({ "preview": true, "data": data })));
+                }
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                Ok(Some(mirror_glyphs(font, &options)?))
+            }
+            Command::Symmetrize {
+                names,
+                axis,
+                source,
+                mode,
+                tolerance,
+                max_fit_error,
+                italic,
+                family,
+                preview,
+                center,
+            } => {
+                let axis = match axis {
+                    None => None,
+                    Some(value) => Some(parse_axis(Some(value))?),
+                };
+                let options = SymmetrizeOptions {
+                    names,
+                    axis,
+                    source,
+                    mode,
+                    tolerance,
+                    max_fit_error,
+                    italic: foundry_core::ItalicMode::from_field(&italic),
+                    family,
+                    preview,
+                    center,
+                };
+                if family {
+                    let targets = self.family_ids(None)?;
+                    if !preview {
+                        self.remember_undo(&targets);
+                    }
+                    let mut reports = Vec::new();
+                    for id in targets {
+                        let font = self.font_mut_id(id)?;
+                        reports.push(symmetrize_glyphs(font, &options)?);
+                    }
+                    return Ok(Some(json!({ "styles": reports })));
+                }
+                if preview {
+                    let mut copy = self.font().ok_or(FoundryError::NoFont)?.clone();
+                    let data = symmetrize_glyphs(&mut copy, &options)?;
+                    return Ok(Some(json!({ "preview": true, "data": data })));
+                }
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                Ok(Some(symmetrize_glyphs(font, &options)?))
+            }
+            Command::CheckSymmetry {
+                names,
+                pairs,
+                center,
+                tolerance,
+                italic,
+            } => {
+                let font = self.font().ok_or(FoundryError::NoFont)?;
+                let pair_refs: Option<Vec<(String, String)>> =
+                    pairs.map(|list| list.into_iter().map(|[a, b]| (a, b)).collect());
+                let data = check_symmetry(
+                    font,
+                    names.as_deref(),
+                    pair_refs.as_deref(),
+                    &center,
+                    tolerance,
+                    foundry_core::ItalicMode::from_field(&italic),
+                )?;
+                Ok(Some(data))
+            }
+            Command::GlyphFromMirror {
+                source,
+                target,
+                transform,
+                center,
+                advance,
+                replace,
+                preset,
+                italic,
+                family,
+                unicode,
+            } => {
+                if family {
+                    let targets = self.family_ids(None)?;
+                    self.remember_undo(&targets);
+                    let mut reports = Vec::new();
+                    for id in targets {
+                        let font = self.font_mut_id(id)?;
+                        reports.push(glyph_from_mirror(
+                            font,
+                            source.as_deref(),
+                            target.as_deref(),
+                            &transform,
+                            &center,
+                            &advance,
+                            replace,
+                            preset.as_deref(),
+                            foundry_core::ItalicMode::from_field(&italic),
+                            unicode,
+                        )?);
+                    }
+                    return Ok(Some(json!({ "styles": reports })));
+                }
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                Ok(Some(glyph_from_mirror(
+                    font,
+                    source.as_deref(),
+                    target.as_deref(),
+                    &transform,
+                    &center,
+                    &advance,
+                    replace,
+                    preset.as_deref(),
+                    foundry_core::ItalicMode::from_field(&italic),
+                    unicode,
+                )?))
             }
             Command::History => self.history_data(),
             Command::Check { a, b } => compare_files(&a, &b),
@@ -1609,14 +2214,12 @@ fn kerning_summary(font: &Font) -> Value {
     })
 }
 
-fn apply_offset(
-    font: &mut Font,
-    options: &OffsetOptions,
-    kind: Option<StrokeKind>,
-) -> Result<Vec<String>, FoundryError> {
-    match kind {
-        Some(kind) => stroke_font(font, options, kind),
-        None => offset_font(font, options),
+fn parse_axis(axis: Option<Value>) -> Result<AxisSpec, FoundryError> {
+    match axis {
+        None => Ok(AxisSpec::default()),
+        Some(Value::String(name)) => Ok(AxisSpec::Named(name)),
+        Some(value) => serde_json::from_value(value)
+            .map_err(|err| FoundryError::Edit(format!("bad axis: {err}"))),
     }
 }
 
@@ -2014,10 +2617,14 @@ mod tests {
         assert_eq!(data["style"]["italic_angle"], json!(-12.0));
         assert_eq!(session.font().unwrap().name, "Wide Italic");
         assert_eq!(session.history(), (0, 0));
-        // The bottom point sits on the baseline, so the shear leaves it and the recentering
-        // shift is what moves it. The ink box stays centred in the advance.
-        let centered = -120.0 * 12.0_f64.to_radians().tan() / 2.0;
-        assert!((first_x(&session) - centered).abs() < 1e-9);
+        // Shear about x_height/2 without recentring (F7). Baseline point y=0 moves by -pivot*shear.
+        let pivot = session.font().unwrap().metrics.x_height / 2.0;
+        let expected = 0.0 + (0.0 - pivot) * 12.0_f64.to_radians().tan();
+        assert!(
+            (first_x(&session) - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            first_x(&session)
+        );
 
         line(
             &mut session,
@@ -2040,7 +2647,7 @@ mod tests {
         let italic_x = other.data.unwrap()["contours"][0]["points"][0]["x"]
             .as_f64()
             .unwrap();
-        assert!((italic_x - (centered + 7.0)).abs() < 1e-9);
+        assert!((italic_x - (expected + 7.0)).abs() < 1e-9);
 
         let listed = line(&mut session, r#"{"op":"fonts"}"#).data.unwrap();
         assert_eq!(listed["fonts"].as_array().unwrap().len(), 2);
