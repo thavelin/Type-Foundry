@@ -89,11 +89,38 @@ Blend is linear interpolation. Both fonts need the same glyph names, contour cou
 - `documents/api.md` — the command contract.
 - `Design/` — the window and its chrome.
 
+## Build
+
+Install Rust with [rustup](https://rustup.rs). The workspace builds on Windows, macOS, and Linux. `App/rust-toolchain.toml` selects the stable toolchain for your platform.
+
+On macOS with Homebrew:
+
+```sh
+brew install rustup
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"   # rustup is keg-only. Add this line to ~/.zshrc.
+rustup toolchain install stable
+```
+
 From `App/`:
 
 ```text
 cargo run -p foundry-cli -- check a.json b.json
 cargo run -p foundry-app --release
 cargo build --release -p foundry-mcp
+```
+
+Build output goes to `App/target`. To put it somewhere else, set `CARGO_TARGET_DIR`, or set `[build] target-dir` in your user Cargo config (`~/.cargo/config.toml`, or `%USERPROFILE%\.cargo\config.toml` on Windows). Do not commit a target directory to `App/.cargo/config.toml`.
+
+The check formats, tests, and lints the workspace. On Windows:
+
+```text
 powershell -ExecutionPolicy Bypass -File scripts/check.ps1
+```
+
+On macOS and Linux:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```

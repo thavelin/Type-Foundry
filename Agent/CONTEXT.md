@@ -24,7 +24,7 @@ PM notes live here. Product code lives in `App/`. Plugins, the CLI, and agents s
 - Version: `v0.1-dev`. Build day 2.
 - Run from `App/`: `cargo run -p foundry-cli -- --help`. Window: `cargo run -p foundry-app --release`. MCP: `cargo run -p foundry-mcp` or `foundry mcp`.
 - Check: `powershell -ExecutionPolicy Bypass -File App/scripts/check.ps1` from the repo root. This machine's execution policy rejects unsigned scripts.
-- Build output: `C:\Users\Troy Havelin\AppData\Local\typefoundry-target` via `App/.cargo/config.toml`. This share creates programs without execute permission, so the target directory stays on `C:`.
+- Build output: `C:\Users\Troy Havelin\AppData\Local\typefoundry-target` via `[build] target-dir` in the user Cargo config (`%USERPROFILE%\.cargo\config.toml`). This share creates programs without execute permission, so the target directory stays on `C:`. The repo does not set a target directory, so other machines build to `App/target`.
 - Hub: https://app.notion.com/p/3ef627d6cfdc81e4a936e4f714b7aff0 — Projects database, priority Next.
 - Agent workspace: https://app.notion.com/p/3ef627d6cfdc8187905bfeaf3fed4d0e
 - Design page: https://app.notion.com/p/3ef627d6cfdc818abbe0e6be4187020d

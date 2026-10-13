@@ -1,4 +1,0 @@
-# T: creates new programs without execute permission, so cargo cannot run
-# build scripts from App/target. Keep the build output on C:.
-[build]
-target-dir = "C:/Users/Troy Havelin/AppData/Local/typefoundry-target"
