@@ -6,12 +6,12 @@ use foundry_core::{
     Anchor, AxisSpec, Contour, Corner, CritiqueLayer, CritiqueSuggestion, DesignDecision,
     ExportFormat, Font, FoundryError, Glyph, InfoUpdate, Kerning, Matrix, MetricsUpdate,
     MirrorOptions, OffsetMode, OffsetOptions, PointKind, ProofOptions, Side, SmoothOptions,
-    SmoothTarget, StrokeKind, StyleUpdate, SymmetrizeOptions, ZoneOptions, audit_font, blend_fonts,
-    capture_genome, check_family, check_genome, check_outlines, check_smoothness, check_spacing,
-    check_symmetry, classify, compatibility, copy_family, critique_font, diff_fonts, export_family,
-    glyph_from_mirror, list_decisions, load_family, measure_font, mirror_glyphs,
-    offset_font_detailed, record_decision, resolve_critique_with, save_family, smooth_outlines,
-    stored_genome, stroke_font, symmetrize_glyphs, write_proof,
+    SmoothTarget, StrokeKind, StyleUpdate, SymmetrizeOptions, ZoneOptions, apply_study, audit_font,
+    blend_fonts, capture_genome, check_family, check_genome, check_outlines, check_smoothness,
+    check_spacing, check_symmetry, classify, compatibility, copy_family, critique_font, diff_fonts,
+    export_family, glyph_from_mirror, list_decisions, list_studies, load_family, measure_font,
+    mirror_glyphs, offset_font_detailed, record_decision, resolve_critique_with, save_family,
+    smooth_outlines, stored_genome, stroke_font, symmetrize_glyphs, write_proof, write_study,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -69,6 +69,42 @@ pub enum Command {
         #[serde(default)]
         options: foundry_core::analyze::Options,
     },
+    StrokeAdd {
+        name: String,
+        stroke: foundry_core::Stroke,
+    },
+    StrokeSet {
+        name: String,
+        index: usize,
+        stroke: foundry_core::Stroke,
+    },
+    StrokeRemove {
+        name: String,
+        index: usize,
+    },
+    StrokeWidth {
+        name: String,
+        index: usize,
+        #[serde(default)]
+        points: Vec<foundry_core::WidthPoint>,
+        #[serde(default)]
+        from_t: Option<f64>,
+        #[serde(default)]
+        preset: Option<foundry_core::StrokePresetOptions>,
+    },
+    StrokeExpand {
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(flatten)]
+        options: foundry_core::StrokeOptions,
+    },
+    StrokePreview {
+        #[serde(default)]
+        names: Option<Vec<String>>,
+        #[serde(flatten)]
+        options: foundry_core::StrokeOptions,
+    },
+
     Create {
         name: String,
         #[serde(default = "default_upm")]
@@ -79,6 +115,8 @@ pub enum Command {
     },
     Save {
         path: String,
+        #[serde(default)]
+        ttf_tolerance: Option<f64>,
         /// Replace an existing file. A copy is kept beside it, with `.bak` added to the name.
         #[serde(default)]
         force: bool,
@@ -618,6 +656,30 @@ pub enum Command {
         #[serde(default)]
         unicode: Option<u32>,
     },
+    /// Fit the open font's proportions to one family in a study.
+    /// `study` is a file path or a name from [`Command::ListStudies`].
+    /// Ratios only: lowercase scale, sidebearings, and vertical metrics.
+    /// Outlines are not copied.
+    FitStudy {
+        study: String,
+        family: String,
+        #[serde(default)]
+        style: Option<String>,
+        #[serde(default)]
+        weight: Option<u16>,
+    },
+    /// List study files the foundry can open by name.
+    ListStudies,
+    /// Measure letterform proportions in a file or folder and write a study.
+    /// The study stores ratios, not outlines.
+    Study {
+        path: String,
+        out: String,
+        #[serde(default)]
+        force: bool,
+        #[serde(default)]
+        progress: bool,
+    },
 }
 
 fn default_stem_tolerance() -> f64 {
@@ -737,7 +799,12 @@ impl Command {
             | Self::Symmetrize { preview: true, .. }
             | Self::Symmetrize { family: true, .. }
             | Self::GlyphFromMirror { family: true, .. } => false,
-            Self::PutGlyph { .. }
+            Self::StrokeAdd { .. }
+            | Self::StrokeSet { .. }
+            | Self::StrokeRemove { .. }
+            | Self::StrokeWidth { .. }
+            | Self::StrokeExpand { .. }
+            | Self::PutGlyph { .. }
             | Self::SetAdvance { .. }
             | Self::MovePoint { .. }
             | Self::MovePoints { .. }
@@ -775,7 +842,8 @@ impl Command {
             | Self::SmoothOutlines { .. }
             | Self::Mirror { .. }
             | Self::Symmetrize { .. }
-            | Self::GlyphFromMirror { .. } => true,
+            | Self::GlyphFromMirror { .. }
+            | Self::FitStudy { .. } => true,
             _ => false,
         }
     }
@@ -1123,6 +1191,15 @@ impl Session {
     }
 
     pub fn execute(&mut self, command: Command) -> Response {
+        let stroke_command = matches!(
+            &command,
+            Command::StrokeAdd { .. }
+                | Command::StrokeSet { .. }
+                | Command::StrokeRemove { .. }
+                | Command::StrokeWidth { .. }
+                | Command::StrokeExpand { .. }
+                | Command::StrokePreview { .. }
+        );
         let edit = command.is_edit();
         let key = command.coalesce_key();
         let before = match self.doc() {
@@ -1146,7 +1223,14 @@ impl Session {
         }
         match result {
             Ok(data) => Response::done(data),
-            Err(err) => Response::fail(err.message, err.data),
+            Err(err) => Response::fail(
+                err.message,
+                if stroke_command {
+                    Some(err.data.unwrap_or_else(|| json!({"points":0,"contours":0})))
+                } else {
+                    err.data
+                },
+            ),
         }
     }
 
@@ -1159,7 +1243,16 @@ impl Session {
         let command = match serde_json::from_str::<Command>(trimmed) {
             Ok(command) => command,
             Err(err) => {
-                return Some(Response::fail(explain_command_error(&err), None));
+                let data = serde_json::from_str::<Value>(trimmed)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("op")
+                            .and_then(Value::as_str)
+                            .map(|op| op.starts_with("stroke_"))
+                            .filter(|v| *v)
+                    })
+                    .map(|_| json!({"points":0,"contours":0}));
+                return Some(Response::fail(explain_command_error(&err), data));
             }
         };
         Some(self.execute(command))
@@ -1167,6 +1260,71 @@ impl Session {
 
     fn dispatch(&mut self, command: Command) -> Result<Option<Value>, Fail> {
         match command {
+            Command::StrokeAdd { name, stroke } => Ok(Some(foundry_core::stroke_edit(
+                self.font_mut().ok_or(FoundryError::NoFont)?,
+                &name,
+                None,
+                "add",
+                Some(stroke),
+                vec![],
+                None,
+                None,
+            )?)),
+            Command::StrokeSet {
+                name,
+                index,
+                stroke,
+            } => Ok(Some(foundry_core::stroke_edit(
+                self.font_mut().ok_or(FoundryError::NoFont)?,
+                &name,
+                Some(index),
+                "set",
+                Some(stroke),
+                vec![],
+                None,
+                None,
+            )?)),
+            Command::StrokeRemove { name, index } => Ok(Some(foundry_core::stroke_edit(
+                self.font_mut().ok_or(FoundryError::NoFont)?,
+                &name,
+                Some(index),
+                "remove",
+                None,
+                vec![],
+                None,
+                None,
+            )?)),
+            Command::StrokeWidth {
+                name,
+                index,
+                points,
+                from_t,
+                preset,
+            } => Ok(Some(foundry_core::stroke_edit(
+                self.font_mut().ok_or(FoundryError::NoFont)?,
+                &name,
+                Some(index),
+                "width",
+                None,
+                points,
+                from_t,
+                preset,
+            )?)),
+            Command::StrokeExpand { names, options } => Ok(Some(foundry_core::expand_strokes(
+                self.font_mut().ok_or(FoundryError::NoFont)?,
+                names.as_deref(),
+                &options,
+                false,
+            )?)),
+            Command::StrokePreview { names, options } => {
+                let mut font = self.font().ok_or(FoundryError::NoFont)?.clone();
+                Ok(Some(foundry_core::expand_strokes(
+                    &mut font,
+                    names.as_deref(),
+                    &options,
+                    true,
+                )?))
+            }
             Command::Create { name, upm } => {
                 let font = Font::new(name, upm)?;
                 let id = self.add_font(font, true);
@@ -1177,13 +1335,32 @@ impl Session {
                 let id = self.add_font(font, false);
                 Ok(Some(self.summary(id)))
             }
-            Command::Save { path, force } => {
+            Command::Save {
+                path,
+                force,
+                ttf_tolerance,
+            } => {
                 let font = self.font().ok_or(FoundryError::NoFont)?;
-                font.save_with(Path::new(&path), force)?;
+                let ttf = if Path::new(&path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("ttf"))
+                {
+                    Some(font.save_ttf_with_options(
+                        Path::new(&path),
+                        force,
+                        foundry_core::TtfOptions {
+                            tolerance: ttf_tolerance.unwrap_or(0.5),
+                        },
+                    )?)
+                } else {
+                    font.save_with(Path::new(&path), force)?;
+                    None
+                };
                 if let Some(doc) = self.doc_mut() {
                     doc.dirty = false;
                 }
-                Ok(Some(json!({ "path": path })))
+                Ok(Some(json!({ "path": path, "ttf": ttf })))
             }
             Command::AtlasEvaluate {
                 font,
@@ -1824,6 +2001,44 @@ impl Session {
                     "count": decisions.len(),
                 })))
             }
+            Command::ListStudies => {
+                let studies = list_studies()?;
+                Ok(Some(json!({
+                    "studies": studies,
+                    "count": studies.len(),
+                })))
+            }
+            Command::FitStudy {
+                study,
+                family,
+                style,
+                weight,
+            } => {
+                let font = self.font_mut().ok_or(FoundryError::NoFont)?;
+                let report =
+                    apply_study(font, Path::new(&study), &family, style.as_deref(), weight)?;
+                Ok(Some(
+                    serde_json::to_value(&report)
+                        .map_err(|err| FoundryError::Json(err.to_string()))?,
+                ))
+            }
+            Command::Study {
+                path,
+                out,
+                force,
+                progress,
+            } => {
+                let library = write_study(Path::new(&path), Path::new(&out), force, progress)?;
+                Ok(Some(json!({
+                    "path": out,
+                    "faces": library.faces.len(),
+                    "families": library.families.len(),
+                    "duplicates": library.duplicates,
+                    "failed": library.failed,
+                    "notes": library.notes,
+                    "family_notes": library.families.iter().map(|family| &family.summary).collect::<Vec<_>>(),
+                })))
+            }
             Command::Critique { min_gap } => {
                 let font = self.font().ok_or(FoundryError::NoFont)?;
                 let suggestions = critique_font(font, min_gap)?;
@@ -2403,6 +2618,7 @@ mod tests {
 
     fn square(name: &str, x: f64, advance: f64) -> Glyph {
         Glyph {
+            strokes: Vec::new(),
             name: name.to_string(),
             unicode: Some(72),
             advance,
@@ -2453,6 +2669,7 @@ mod tests {
         assert!(
             session
                 .execute(Command::Save {
+                    ttf_tolerance: None,
                     path: narrow_path.to_string_lossy().into_owned(),
                     force: false,
                 })
@@ -2477,6 +2694,7 @@ mod tests {
         assert!(
             session
                 .execute(Command::Save {
+                    ttf_tolerance: None,
                     path: wide_path.to_string_lossy().into_owned(),
                     force: false,
                 })
@@ -2521,6 +2739,7 @@ mod tests {
                 .ok
         );
         let saved = session.execute(Command::Save {
+            ttf_tolerance: None,
             path: ufo_path.to_string_lossy().into_owned(),
             force: false,
         });
@@ -2534,6 +2753,7 @@ mod tests {
         });
         assert!(moved.ok, "{moved:?}");
         let saved_json = session.execute(Command::Save {
+            ttf_tolerance: None,
             path: json_path.to_string_lossy().into_owned(),
             force: false,
         });
@@ -2822,12 +3042,14 @@ mod tests {
         assert!(
             session
                 .execute(Command::Save {
+                    ttf_tolerance: None,
                     path: file.clone(),
                     force: false,
                 })
                 .ok
         );
         let refused = session.execute(Command::Save {
+            ttf_tolerance: None,
             path: file.clone(),
             force: false,
         });
@@ -2836,6 +3058,7 @@ mod tests {
         assert!(
             session
                 .execute(Command::Save {
+                    ttf_tolerance: None,
                     path: file,
                     force: true,
                 })
@@ -2947,6 +3170,7 @@ mod tests {
 
     fn two_stem_h() -> Glyph {
         Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(0x48),
             advance: 120.0,

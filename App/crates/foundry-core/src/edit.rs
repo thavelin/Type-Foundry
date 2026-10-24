@@ -791,6 +791,7 @@ mod tests {
     fn font_with(contours: Vec<Contour>) -> Font {
         let mut font = Font::new("Edits", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "a".into(),
             unicode: Some(97),
             advance: 500.0,
@@ -957,6 +958,7 @@ mod tests {
     fn glyph_and_font_settings() {
         let mut font = font_with(vec![square()]);
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "b".into(),
             unicode: None,
             advance: 1.0,
@@ -1016,6 +1018,7 @@ mod tests {
         .unwrap();
         assert_eq!(xy(&font)[0], (3.3, 0.6, PointKind::On));
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "b".into(),
             unicode: None,
             advance: 1.0,
@@ -1067,6 +1070,7 @@ mod tests {
     fn scale_width_keeps_a_stem_and_scales_the_sidebearings() {
         let mut font = Font::new("Width", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(72),
             advance: 400.0,
@@ -1103,6 +1107,7 @@ mod tests {
     fn move_glyph_inserts_at_the_requested_index() {
         let mut font = font_with(vec![square()]);
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "b".into(),
             unicode: None,
             advance: 100.0,
@@ -1117,6 +1122,7 @@ mod tests {
     fn duplicate_unicode_is_refused() {
         let mut font = font_with(vec![square()]);
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "b".into(),
             unicode: None,
             advance: 100.0,

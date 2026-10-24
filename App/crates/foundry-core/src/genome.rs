@@ -296,6 +296,7 @@ mod tests {
     /// Two vertical stems of width 20 at x=0–20 and x=80–100, advance 120.
     fn h_like() -> Glyph {
         Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(0x48),
             advance: 120.0,

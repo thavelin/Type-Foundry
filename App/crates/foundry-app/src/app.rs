@@ -912,13 +912,41 @@ impl FoundryWindow {
 
     pub fn save_to(&mut self, path: PathBuf) {
         let response = self.run(Command::Save {
+            ttf_tolerance: None,
             path: path.to_string_lossy().into_owned(),
             force: true,
         });
         if response.ok {
             self.remember_dir(&path);
             self.settings.remember_recent(&path);
-            self.status = (format!("Saved {}", path.display()), Tone::Done);
+            self.status = if let Some(report) = response
+                .data
+                .as_ref()
+                .and_then(|d| d.get("ttf"))
+                .filter(|r| r.is_object())
+            {
+                let splits = report["split_segments"].as_u64().unwrap_or(0);
+                let error = report["max_error"].as_f64().unwrap_or(0.0);
+                let exceeded = report["tolerance_exceeded"].as_u64().unwrap_or(0);
+                let warning = if exceeded > 0 {
+                    format!("; {exceeded} segments exceed tolerance after rounding")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        "Saved {} — {splits} cubics split; max error {error:.3} units{warning}",
+                        path.display()
+                    ),
+                    if exceeded > 0 {
+                        Tone::Quiet
+                    } else {
+                        Tone::Done
+                    },
+                )
+            } else {
+                (format!("Saved {}", path.display()), Tone::Done)
+            };
             if let Some(id) = self.active {
                 self.paths.insert(id, path);
             }

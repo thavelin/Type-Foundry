@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/geom", "crates/pathops"]
+resolver = "2"
+[workspace.dependencies]
+kurbo = { version = "0.13", features = ["serde"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }

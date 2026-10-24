@@ -144,6 +144,12 @@ impl Server {
             "features_set" => "set_features",
             "path_offset" => "offset",
             "path_stroke" => "stroke",
+            "stroke_add" => "stroke_add",
+            "stroke_set" => "stroke_set",
+            "stroke_remove" => "stroke_remove",
+            "stroke_width" => "stroke_width",
+            "stroke_expand" => "stroke_expand",
+            "stroke_preview" => "stroke_preview",
             "sidebearing_set" => "set_sidebearing",
             "outline_check" => "check_outlines",
             "spacing_check" => "check_spacing",
@@ -163,6 +169,8 @@ impl Server {
             "decision_list" => "list_decisions",
             "font_critique" => "critique",
             "critique_resolve" => "resolve_critique",
+            "study_library" => "study",
+            "study_fit" => "fit_study",
             "outline_smooth" => "smooth_outlines",
             "smoothness_check" => "check_smoothness",
             "glyph_mirror" => "mirror",
@@ -190,6 +198,9 @@ impl Server {
         let command = match serde_json::from_value::<Command>(Value::Object(args.clone())) {
             Ok(command) => command,
             Err(err) => {
+                if name.starts_with("stroke_") {
+                    return Ok(tool_result(&json!({"ok":false,"error":format!("bad arguments for {name}: {err}"),"data":{"points":0,"contours":0}}).to_string(),true));
+                }
                 return Ok(tool_result(
                     &format!("bad arguments for {name}: {err}"),
                     true,
@@ -333,6 +344,7 @@ fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "path": path,
+                    "ttf_tolerance": { "type": "number", "exclusiveMinimum": 0, "default": 0.5, "description": "Cubic approximation tolerance in font units. Save reports final rounded error and any tolerance exceedances." },
                     "force": { "type": "boolean", "default": false }
                 }
             }
@@ -909,6 +921,34 @@ fn tool_list() -> Value {
                 },
                 "required": ["id", "accepted"]
             }
+        },
+        {
+            "name": "study_fit",
+            "description": "Fit the open font to one family in a study. study is a file path or a library name such as klim-2026-10-17. Lowercase x-height ratio, letter sidebearings, and vertical metrics. Ratios only. Does not copy outlines.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "study": { "type": "string" },
+                    "family": { "type": "string" },
+                    "style": { "type": "string" },
+                    "weight": { "type": "integer" }
+                },
+                "required": ["study", "family"]
+            }
+        },
+        {
+            "name": "study_library",
+            "description": "Measure letterform proportions in a font or folder and write a study file. Stores ratios only, not outlines.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "out": { "type": "string" },
+                    "force": { "type": "boolean", "default": false },
+                    "progress": { "type": "boolean", "default": false }
+                },
+                "required": ["path", "out"]
+            }
         }
     ]) {
         tools.extend(more);
@@ -962,6 +1002,40 @@ fn tool_list() -> Value {
     ] {
         tools.push(json!({"name":name,"description":"Explore a local measurement-only font knowledge base: family-balanced vectors, neighbors, class observations and evidence-backed original-design briefs. Gaps are collection hypotheses, not proof of global novelty.","inputSchema":{"type":"object","required":required,"properties":properties,"additionalProperties":false},"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}));
     }
+    for (name, required, properties) in [
+        (
+            "stroke_add",
+            json!(["name", "stroke"]),
+            json!({"name":{"type":"string"},"stroke":{"type":"object","description":"centerline contour, widths [{t,left,right,angle?}], ease linear/smooth, cap butt/round/square/angled, cap_angle, join miter/round/bevel, miter_limit, stem, join_thinning {percent,distance}"}}),
+        ),
+        (
+            "stroke_set",
+            json!(["name", "index", "stroke"]),
+            json!({"name":{"type":"string"},"index":{"type":"integer","minimum":0},"stroke":{"type":"object"}}),
+        ),
+        (
+            "stroke_remove",
+            json!(["name", "index"]),
+            json!({"name":{"type":"string"},"index":{"type":"integer","minimum":0}}),
+        ),
+        (
+            "stroke_width",
+            json!(["name", "index"]),
+            json!({"name":{"type":"string"},"index":{"type":"integer","minimum":0},"points":{"type":"array","items":{"type":"object","properties":{"t":{"type":"number"},"left":{"type":"number"},"right":{"type":"number"},"angle":{"type":"number"}},"required":["t","left","right"]}},"from_t":{"type":"number"},"preset":{"type":"object","properties":{"kind":{"enum":["taper_start","taper_end","taper_both","swell","pinch"]},"amount":{"type":"number"},"t":{"type":"number"}},"required":["kind","amount"]}}),
+        ),
+        (
+            "stroke_expand",
+            json!([]),
+            json!({"names":{"type":"array","items":{"type":"string"}},"tolerance":{"type":"number","default":0.5},"keep_strokes":{"type":"boolean"},"fixed_structure":{"type":"boolean"}}),
+        ),
+        (
+            "stroke_preview",
+            json!([]),
+            json!({"names":{"type":"array","items":{"type":"string"}},"tolerance":{"type":"number","default":0.5},"fixed_structure":{"type":"boolean"}}),
+        ),
+    ] {
+        tools.push(json!({"name":name,"description":"Persistent centerline stroke tool. Returns ok/error JSON and point/contour counts. See documents/api.md for model and guarantees.","inputSchema":{"type":"object","properties":properties,"required":required}}));
+    }
     Value::Array(tools)
 }
 
@@ -1001,6 +1075,76 @@ mod tests {
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
     }
 
+    #[test]
+    fn centerline_tools_route_through_session() {
+        let mut server = Server::new();
+        let listed = tool_list();
+        for name in [
+            "stroke_add",
+            "stroke_set",
+            "stroke_remove",
+            "stroke_width",
+            "stroke_expand",
+            "stroke_preview",
+        ] {
+            assert!(listed.as_array().unwrap().iter().any(|v| v["name"] == name));
+        }
+        assert_eq!(
+            payload(&call(
+                &mut server,
+                1,
+                "font_create",
+                json!({"name":"Stroke MCP"})
+            ))["ok"],
+            true
+        );
+        server
+            .session
+            .execute_line(
+                r#"{"op":"put_glyph","glyph":{"name":"test","advance":600,"contours":[]}}"#,
+            )
+            .unwrap();
+        let st = json!({"centerline":{"closed":false,"points":[{"x":0,"y":0,"kind":"on","smooth":false},{"x":500,"y":0,"kind":"on","smooth":false}]}});
+        assert_eq!(
+            payload(&call(
+                &mut server,
+                2,
+                "stroke_add",
+                json!({"name":"test","stroke":st})
+            ))["ok"],
+            true
+        );
+        assert_eq!(
+            payload(&call(&mut server, 3, "stroke_preview", json!({})))["data"]["points"],
+            4
+        );
+        let bad = payload(&call(&mut server, 4, "stroke_set", json!({})));
+        assert_eq!(bad["ok"], false);
+        assert_eq!(bad["data"]["points"], 0);
+        let set = call(
+            &mut server,
+            6,
+            "stroke_width",
+            json!({"name":"test","index":0,"points":[{"t":0.5,"left":80,"right":60}]}),
+        );
+        assert_eq!(payload(&set)["ok"], true);
+        let preview = payload(&call(
+            &mut server,
+            7,
+            "stroke_preview",
+            json!({"fixed_structure":true}),
+        ));
+        assert_eq!(preview["ok"], true);
+        assert_eq!(preview["data"]["compatible"], true);
+        assert_eq!(
+            preview["data"]["glyphs"][0]["structure_key"]["width_positions"],
+            json!([0.0, 0.5, 1.0])
+        );
+        assert_eq!(
+            payload(&call(&mut server, 5, "stroke_expand", json!({})))["ok"],
+            true
+        );
+    }
     #[test]
     fn initialize_echoes_the_protocol_version() {
         let mut server = Server::new();
@@ -1061,7 +1205,9 @@ mod tests {
         assert!(names.contains(&"decision_record"));
         assert!(names.contains(&"font_critique"));
         assert!(names.contains(&"critique_resolve"));
-        assert_eq!(names.len(), 60);
+        assert!(names.contains(&"study_library"));
+        assert!(names.contains(&"study_fit"));
+        assert_eq!(names.len(), 68);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }

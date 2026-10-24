@@ -1,0 +1,10 @@
+[package]
+name = "vectorcraft-pathops"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+[dependencies]
+kurbo.workspace = true
+thiserror.workspace = true
+vectorcraft-geom = { path = "../geom" }
+linesweeper = "0.5"

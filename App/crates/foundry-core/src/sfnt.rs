@@ -136,6 +136,7 @@ pub(crate) fn read_face_subset(
             let _ = face.outline_glyph(id, &mut pen);
         }
         let glyph = Glyph {
+            strokes: Vec::new(),
             name,
             unicode,
             advance: f64::from(face.glyph_hor_advance(id).unwrap_or(0)),
@@ -729,6 +730,7 @@ mod tests {
     fn face(name: &str, shift: f64, advance: f64) -> Font {
         let mut font = Font::new(name, 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance,
@@ -744,6 +746,7 @@ mod tests {
         })
         .unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "o".into(),
             unicode: Some(u32::from('o')),
             advance: 500.0,
@@ -759,6 +762,7 @@ mod tests {
         })
         .unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "space".into(),
             unicode: Some(32),
             advance: 250.0,

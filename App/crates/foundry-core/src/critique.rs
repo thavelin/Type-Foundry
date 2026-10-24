@@ -281,6 +281,7 @@ mod tests {
 
     fn h_like() -> Glyph {
         Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(0x48),
             advance: 120.0,

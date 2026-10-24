@@ -369,6 +369,7 @@ fn import_glyph(glyph: &norad::Glyph, contours: &[norad::Contour]) -> Result<Gly
         .map(|contour| import_contour(contour, name))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Glyph {
+        strokes: Vec::new(),
         name: name.to_string(),
         unicode,
         advance: glyph.width,
@@ -654,6 +655,7 @@ mod tests {
         let path = dir.join("curves.ufo");
         let mut font = Font::new("Curves", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "C".into(),
             unicode: Some('C' as u32),
             advance: 500.0,
@@ -784,6 +786,7 @@ mod tests {
         let path = dir.join("Kept.ufo");
         let mut font = Font::new("Kept", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -859,6 +862,7 @@ mod tests {
         let path = dir.join("start.ufo");
         let mut font = Font::new("Start", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "o".into(),
             unicode: Some(u32::from('o')),
             advance: 400.0,

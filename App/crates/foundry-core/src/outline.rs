@@ -22,6 +22,7 @@ pub fn check_outlines(font: &Font) -> Vec<OutlineIssue> {
     for glyph in &font.glyphs {
         issues.extend(glyph_issues(font, glyph));
     }
+    issues.extend(crate::ttf::outline_issues(font));
     issues
 }
 
@@ -580,6 +581,7 @@ mod tests {
     fn flags_a_bowtie_and_a_floating_letter() {
         let mut font = Font::new("Check", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "X".into(),
             unicode: Some(u32::from('X')),
             advance: 200.0,
@@ -595,6 +597,7 @@ mod tests {
         })
         .unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 200.0,

@@ -35,6 +35,8 @@ pub struct Contour {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Glyph {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<crate::stroke::Stroke>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unicode: Option<u32>,
@@ -390,6 +392,13 @@ impl Font {
     /// `force` replaces an existing file and keeps the previous one as `name.bak`.
     pub fn save_with(&self, path: &Path, force: bool) -> Result<(), FoundryError> {
         self.validate()?;
+        if self.glyphs.iter().any(|g| !g.strokes.is_empty())
+            && (crate::ufo::is_ufo_path(path) || crate::ttf::is_ttf_path(path))
+        {
+            return Err(FoundryError::Edit(
+                "expand strokes before exporting UFO/TTF; JSON preserves centerlines".into(),
+            ));
+        }
         crate::save::prepare_write(path, force)?;
         if crate::sfnt::is_read_only_path(path) {
             return Err(FoundryError::Import(format!(
@@ -416,6 +425,31 @@ impl Font {
             fs::create_dir_all(parent).map_err(|err| FoundryError::Io(err.to_string()))?;
         }
         fs::write(path, self.to_json()?).map_err(|err| FoundryError::Io(err.to_string()))
+    }
+
+    /// Export TrueType with configurable conversion accuracy and quantization diagnostics.
+    pub fn save_ttf_with_options(
+        &self,
+        path: &Path,
+        force: bool,
+        options: crate::TtfOptions,
+    ) -> Result<crate::TtfReport, FoundryError> {
+        self.validate()?;
+        if !crate::ttf::is_ttf_path(path) {
+            return Err(FoundryError::Ttf("TTF export requires a .ttf path".into()));
+        }
+        if self.glyphs.iter().any(|g| !g.strokes.is_empty()) {
+            return Err(FoundryError::Edit(
+                "expand strokes before exporting UFO/TTF; JSON preserves centerlines".into(),
+            ));
+        }
+        let (bytes, report) = crate::ttf::write_ttf_options(self, options)?;
+        crate::save::prepare_write(path, force)?;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).map_err(|e| FoundryError::Io(e.to_string()))?;
+        }
+        fs::write(path, bytes).map_err(|e| FoundryError::Io(e.to_string()))?;
+        Ok(report)
     }
 
     /// Replace the name-table fields that were passed. `None` keeps the current value.
@@ -779,6 +813,9 @@ pub fn validate_glyph(glyph: &Glyph) -> Result<(), FoundryError> {
     }
     if !glyph.advance.is_finite() {
         return Err(FoundryError::NonFinite);
+    }
+    for stroke in &glyph.strokes {
+        crate::stroke::validate_stroke(stroke)?;
     }
     for contour in &glyph.contours {
         if contour.points.is_empty() {

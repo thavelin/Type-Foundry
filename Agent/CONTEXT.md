@@ -66,6 +66,28 @@ Frozen for now:
 
 ## Session log
 
+### 2026-10-24 — Consolidate font analysis and current engine work on main
+
+- Troy requested merging all current work to main. Fast-forwarded codex/font-collection-analyzer (e3b3f60 and a6d6545), then reconciled the existing pending centerline stroke, letterform-study, SVG fitting, editor, and compatible TrueType-export work.
+- Preserved the complete prior tracked/untracked development state at refs/backups/codex/pre-analyzer-merge-20261024 before integration. Both sets of API commands and MCP tools remain available (68 tools); analyzer fixtures include the new glyph stroke field.
+- Validation: formatting and strict workspace/all-targets clippy passed; cargo test --workspace passed 222 tests with three existing ignored. The release build and scanner integration checks are recorded in the Codex shared-memory session log.
+- The Font Atlas measurements and offline explorer remain outside source control at T:\troy-freeform\TypeFoundry-Knowledge\2026-10-24-atlas-v1 (README.md). Source font libraries were not changed.
+- This consolidates local source history. Existing font libraries and atlas records were not uploaded.
+
+
+### 2026-10-17 — Study library
+
+- The Klim study is now `studies/klim-2026-10-17.json` in the Type Foundry tree. The AppData copy stays. The tree copy wins when both have the same name.
+- `foundry studies` and `list_studies` list the library. `foundry fit --study klim-2026-10-17` and `fit_study` accept that name from any working directory. A unique part of the name, such as `klim`, also works.
+- Later studies dropped in `studies/` or `%APPDATA%/Type Foundry/data/studies` are listed without a rebuild. Outlines stay out of the files. Not committed.
+
+### 2026-10-17 — Letterform study
+
+- Focus: measure a folder of reference fonts and keep the proportions, not the outlines.
+- `foundry study PATH --out FILE` and the `study` command write `typefoundry.study` version 1. MCP tool `study_library`. A repeated family, style, weight, italic, and width is skipped. Static files win over variable and web copies.
+- The study records stem, contrast, width, x-height, overshoot, fitting, and weight growth. It does not record contours.
+- Validation: `App/scripts/check.ps1` passed. Release `foundry.exe` studied `C:\Users\Troy Havelin\Downloads\KlimTestFonts`: 696 faces, 74 family names, 656 duplicate files, 0 unreadable. Study file: `%APPDATA%\Type Foundry\data\studies\klim-2026-10-17.json`. Outlines are not in that file. Not committed.
+
 ### 2026-10-08 — AI critique layer
 
 - Focus: Ranked critiques from audit/genome with confidence; Accept/Reject → DesignDecision.

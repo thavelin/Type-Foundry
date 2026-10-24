@@ -4,7 +4,9 @@
 //! `U+0041.svg` and `uni0041.svg` are accepted too. The drawings are usually tight crops
 //! from one scale, so the importer puts flat letters on a shared baseline, centers round
 //! letters so their overshoot is split, and hangs descenders below that baseline. The
-//! x-height of the flat lowercase becomes 500 units in a 1000-unit em.
+//! x-height of the flat lowercase becomes 500 units in a 1000-unit em. When that
+//! scale would push the flat caps above 900, the caps land on 700 instead, and the
+//! x-height gets shorter so the drawing still fits the em.
 
 use std::fs;
 use std::path::Path;
@@ -130,6 +132,7 @@ fn font_from_svgs(name: &str, sources: &[(u32, String)]) -> Result<Font, Foundry
     font.metrics.descender = metrics.3;
     for glyph in drawn {
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: glyph_name(glyph.unicode),
             unicode: Some(glyph.unicode),
             advance: glyph.advance,
@@ -213,8 +216,7 @@ fn fit_tight(glyphs: &mut [Drawn], filled: bool) {
             let height = glyph.ink.map(Ink::height).unwrap_or(target).max(0.01);
             scale_drawn(glyph, target / height);
         }
-    } else if let Some(reference) = x_height_source(glyphs) {
-        let scale = X_HEIGHT / reference.max(0.01);
+    } else if let Some(scale) = tight_scale(glyphs) {
         for glyph in glyphs.iter_mut() {
             scale_drawn(glyph, scale);
         }
@@ -242,6 +244,7 @@ fn fit_tight(glyphs: &mut [Drawn], filled: bool) {
         .collect();
     let descender = median(&mut descender_bottoms).unwrap_or(DESCENDER);
     place_bottoms(glyphs, |code| code == u32::from('j'), descender);
+    place_bottoms(glyphs, below_baseline, descender);
     place_bottoms(glyphs, baseline_mark, 0.0);
     let period_top = line_top(glyphs, |code| code == u32::from('.')).unwrap_or(x_height * 0.2);
     place_tops(glyphs, |code| code == u32::from(','), period_top);
@@ -284,6 +287,19 @@ fn placed(code: u32) -> bool {
         || cap_top_mark(code)
         || x_height_center(code)
         || body_center(code)
+        || below_baseline(code)
+}
+
+/// Scale separate crops from the flat x-height. A cap that would then sit above
+/// 900 has used up the em (a cap of about 740 stays on the 500 x-height), so those
+/// caps are fitted to 700 and the lowercase shortens with them.
+fn tight_scale(glyphs: &[Drawn]) -> Option<f64> {
+    let reference = x_height_source(glyphs)?;
+    let x_scale = X_HEIGHT / reference.max(0.01);
+    match ink_heights(glyphs, flat_cap) {
+        Some(cap) if cap > 0.01 && cap * x_scale > 900.0 => Some(CAP_HEIGHT / cap),
+        _ => Some(x_scale),
+    }
 }
 
 fn x_height_source(glyphs: &[Drawn]) -> Option<f64> {
@@ -345,6 +361,14 @@ fn center_overshoot(glyphs: &mut [Drawn], pred: fn(u32) -> bool, band: f64) {
     }
 }
 
+fn line_peak(glyphs: &[Drawn], pred: fn(u32) -> bool) -> Option<f64> {
+    glyphs
+        .iter()
+        .filter(|glyph| pred(glyph.unicode))
+        .filter_map(|glyph| glyph.ink.map(|ink| ink.max_y))
+        .max_by(f64::total_cmp)
+}
+
 fn line_top(glyphs: &[Drawn], pred: fn(u32) -> bool) -> Option<f64> {
     let mut tops: Vec<f64> = glyphs
         .iter()
@@ -364,7 +388,8 @@ fn metrics_of(glyphs: &[Drawn]) -> (f64, f64, f64, f64) {
     let ascender = line_top(glyphs, ascender_letter)
         .unwrap_or(cap)
         .max(cap)
-        .max(x_height);
+        .max(x_height)
+        .max(line_peak(glyphs, metric_high).unwrap_or(cap));
     let mut lows: Vec<f64> = glyphs
         .iter()
         .filter(|glyph| {
@@ -373,7 +398,12 @@ fn metrics_of(glyphs: &[Drawn]) -> (f64, f64, f64, f64) {
         .filter_map(|glyph| glyph.ink.map(|ink| ink.min_y))
         .filter(|low| *low < -1.0)
         .collect();
-    let descender = median(&mut lows).unwrap_or(DESCENDER).min(0.0);
+    let mut descender = median(&mut lows).unwrap_or(DESCENDER).min(0.0);
+    for glyph in glyphs.iter().filter(|glyph| metric_low(glyph.unicode)) {
+        if let Some(low) = glyph.ink.map(|ink| ink.min_y).filter(|low| *low < -1.0) {
+            descender = descender.min(low);
+        }
+    }
     (ascender, cap, x_height, descender)
 }
 
@@ -509,11 +539,33 @@ fn baseline_mark(code: u32) -> bool {
 }
 
 fn cap_top_mark(code: u32) -> bool {
-    matches!(char::from_u32(code), Some('"' | '*' | '^'))
+    // Quotes sit under the cap line. Dollar and at are tall: their tops stay on
+    // the cap line and the rest hangs below the baseline.
+    matches!(
+        char::from_u32(code),
+        Some('"' | '\'' | '`' | '*' | '^' | '$' | '@')
+    )
 }
 
 fn x_height_center(code: u32) -> bool {
-    matches!(char::from_u32(code), Some('+' | '<' | '=' | '>' | '~'))
+    matches!(
+        char::from_u32(code),
+        Some('-' | '+' | '<' | '=' | '>' | '~')
+    )
+}
+
+fn below_baseline(code: u32) -> bool {
+    code == u32::from('_')
+}
+
+/// Ink that should raise the ascender when it sticks above the letters.
+fn metric_high(code: u32) -> bool {
+    matches!(char::from_u32(code), Some('|' | '$' | '@'))
+}
+
+/// Ink that should lower the descender when it hangs below the letters.
+fn metric_low(code: u32) -> bool {
+    matches!(char::from_u32(code), Some(',' | '_' | '$' | '@' | '|'))
 }
 
 fn body_center(code: u32) -> bool {
@@ -968,5 +1020,110 @@ mod tests {
         assert!(comma0 < -1.0, "comma {comma0}");
         assert_eq!(font.glyph("A").unwrap().unicode, Some(0x41));
         assert!(font.glyph("space").unwrap().contours.is_empty());
+    }
+
+    #[test]
+    fn punctuation_keeps_its_place_on_the_em() {
+        let font = font_from_svgs(
+            "Marks",
+            &[
+                (0x78, box_svg(10.0, 25.0)),
+                (0x48, box_svg(20.0, 37.0)),
+                (0x2D, box_svg(8.0, 2.0)),
+                (0x5F, box_svg(10.0, 3.0)),
+                (0x27, box_svg(2.0, 6.0)),
+                (0x60, box_svg(2.0, 6.0)),
+                (0x24, box_svg(8.0, 45.0)),
+                (0x40, box_svg(12.0, 42.0)),
+                (0x23, box_svg(8.0, 20.0)),
+            ],
+        )
+        .unwrap();
+        assert!(
+            near(font.metrics.x_height, 500.0),
+            "{}",
+            font.metrics.x_height
+        );
+        assert!(
+            near(font.metrics.cap_height, 740.0),
+            "{}",
+            font.metrics.cap_height
+        );
+        let (hyphen0, hyphen1) = span(&font, "-");
+        assert!(
+            near((hyphen0 + hyphen1) / 2.0, 250.0),
+            "{hyphen0} {hyphen1}"
+        );
+        let (under0, under1) = span(&font, "_");
+        assert!(under1 < -1.0, "underscore top {under1}");
+        assert!(near(under0, -200.0), "underscore bottom {under0}");
+        let (_, quote1) = span(&font, "'");
+        assert!(near(quote1, 740.0), "apostrophe {quote1}");
+        let (_, grave1) = span(&font, "`");
+        assert!(near(grave1, 740.0), "grave {grave1}");
+        let (dollar0, dollar1) = span(&font, "$");
+        assert!(near(dollar1, 740.0), "dollar top {dollar1}");
+        assert!(dollar0 < -50.0, "dollar hangs {dollar0}");
+        let (at0, at1) = span(&font, "@");
+        assert!(near(at1, 740.0), "at top {at1}");
+        assert!(at0 < -1.0, "at hangs {at0}");
+        let (hash0, _) = span(&font, "#");
+        assert!(near(hash0, 0.0), "hash {hash0}");
+        assert!(
+            font.metrics.descender <= -199.0,
+            "{}",
+            font.metrics.descender
+        );
+    }
+
+    #[test]
+    fn a_tall_bar_raises_the_ascender() {
+        let font = font_from_svgs(
+            "Bar",
+            &[
+                (0x78, box_svg(10.0, 25.0)),
+                (0x48, box_svg(20.0, 37.0)),
+                (0x24, box_svg(8.0, 40.0)),
+                (0x40, box_svg(8.0, 40.0)),
+                (0x7C, box_svg(4.0, 50.0)),
+            ],
+        )
+        .unwrap();
+        assert!(font.metrics.ascender > 850.0, "{}", font.metrics.ascender);
+        assert!(
+            font.metrics.descender < -100.0,
+            "{}",
+            font.metrics.descender
+        );
+        let (bar0, bar1) = span(&font, "|");
+        assert!(bar1 > font.metrics.cap_height, "{bar1}");
+        assert!(bar0 < -1.0, "{bar0}");
+    }
+
+    #[test]
+    fn a_tall_cap_shrinks_so_the_cap_fits_the_em() {
+        let font = font_from_svgs(
+            "Tall",
+            &[(0x78, box_svg(10.0, 25.0)), (0x48, box_svg(20.0, 48.0))],
+        )
+        .unwrap();
+        let expected_x = 700.0 * 25.0 / 48.0;
+        assert!(
+            near(font.metrics.cap_height, 700.0),
+            "{}",
+            font.metrics.cap_height
+        );
+        assert!(
+            near(font.metrics.x_height, expected_x),
+            "{}",
+            font.metrics.x_height
+        );
+        let (x0, x1) = span(&font, "x");
+        assert!(near(x0, 0.0), "{x0}");
+        assert!(near(x1, expected_x), "{x1}");
+        let (h0, h1) = span(&font, "H");
+        assert!(near(h0, 0.0), "{h0}");
+        assert!(near(h1, 700.0), "{h1}");
+        assert!(h1 <= 1000.0);
     }
 }

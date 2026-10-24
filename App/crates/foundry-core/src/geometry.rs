@@ -1057,6 +1057,7 @@ mod tests {
     #[test]
     fn outline_valid_flags_a_bowtie() {
         let glyph = Glyph {
+            strokes: Vec::new(),
             name: "x".into(),
             unicode: None,
             advance: 100.0,

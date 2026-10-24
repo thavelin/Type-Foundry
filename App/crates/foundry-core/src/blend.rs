@@ -37,6 +37,19 @@ pub fn blend_fonts(a: &Font, b: &Font, t: f64) -> Result<Font, Vec<CompatIssue>>
 
 pub fn compatibility(a: &Font, b: &Font) -> Vec<CompatIssue> {
     let mut issues = Vec::new();
+    if a.glyphs
+        .iter()
+        .chain(&b.glyphs)
+        .any(|g| !g.strokes.is_empty())
+    {
+        issues.push(CompatIssue {
+            code: "strokes",
+            glyph: None,
+            contour: None,
+            point: None,
+            detail: "expand centerline strokes before blending masters".into(),
+        });
+    }
     if a.upm != b.upm {
         issues.push(CompatIssue {
             code: "upm",
@@ -199,6 +212,7 @@ fn interpolate(a: &Font, b: &Font, t: f64) -> Font {
 
 fn interpolate_glyph(a: &Glyph, b: &Glyph, t: f64) -> Glyph {
     Glyph {
+        strokes: Vec::new(),
         name: a.name.clone(),
         unicode: a.unicode,
         advance: lerp(a.advance, b.advance, t),
@@ -255,6 +269,7 @@ mod tests {
 
     fn square(name: &str, unicode: u32, x: f64, advance: f64) -> Glyph {
         Glyph {
+            strokes: Vec::new(),
             name: name.to_string(),
             unicode: Some(unicode),
             advance,

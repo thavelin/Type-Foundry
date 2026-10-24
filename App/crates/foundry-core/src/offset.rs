@@ -515,6 +515,7 @@ fn counter_width(glyph: &Glyph) -> f64 {
             continue;
         }
         let (min_x, max_x, _, _) = ink_bounds(&Glyph {
+            strokes: Vec::new(),
             name: String::new(),
             unicode: None,
             advance: 0.0,
@@ -1703,6 +1704,7 @@ mod tests {
     fn square_font() -> Font {
         let mut font = Font::new("Square", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -1755,6 +1757,7 @@ mod tests {
     fn ring_outer_grows_not_shrinks() {
         let mut font = Font::new("Ring", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "o".into(),
             unicode: Some(u32::from('o')),
             advance: 500.0,
@@ -1806,6 +1809,7 @@ mod tests {
     fn clockwise_outer_still_grows() {
         let mut font = Font::new("Period", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "period".into(),
             unicode: Some(u32::from('.')),
             advance: 200.0,
@@ -1915,6 +1919,7 @@ mod tests {
     fn collision_keeps_a_counter_open() {
         let mut font = Font::new("Counter", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "o".into(),
             unicode: Some(u32::from('o')),
             advance: 400.0,
@@ -2005,6 +2010,7 @@ mod tests {
     fn api_square_keeps_baseline() {
         let mut font = Font::new("Offset", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(72),
             advance: 400.0,

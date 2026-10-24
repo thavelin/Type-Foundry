@@ -391,9 +391,27 @@ pub fn export_family(
             }
         }
     }
+    let ttf_bytes = if format == ExportFormat::Ttf {
+        for font in fonts {
+            font.validate()?;
+            if font.glyphs.iter().any(|g| !g.strokes.is_empty()) {
+                return Err(FoundryError::Edit(
+                    "expand strokes before exporting UFO/TTF; JSON preserves centerlines".into(),
+                ));
+            }
+        }
+        Some(crate::ttf::write_ttf_family(fonts)?)
+    } else {
+        None
+    };
     fs::create_dir_all(dir).map_err(|err| FoundryError::Io(err.to_string()))?;
-    for (font, path) in fonts.iter().zip(&paths) {
-        font.save_with(path, force)?;
+    for (index, (font, path)) in fonts.iter().zip(&paths).enumerate() {
+        if let Some(bytes) = &ttf_bytes {
+            crate::save::prepare_write(path, force)?;
+            fs::write(path, &bytes[index]).map_err(|err| FoundryError::Io(err.to_string()))?;
+        } else {
+            font.save_with(path, force)?;
+        }
     }
     Ok(paths)
 }
@@ -545,6 +563,7 @@ mod tests {
         let mut font = Font::new("Wide", 1000).unwrap();
         for (name, code) in [("H", 72), ("I", 73)] {
             font.insert_glyph(Glyph {
+                strokes: Vec::new(),
                 name: name.into(),
                 unicode: Some(code),
                 advance: 500.0,

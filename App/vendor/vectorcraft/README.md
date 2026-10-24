@@ -1,0 +1,1 @@
+Local source snapshot from VectorCraft (2026-10-23). Geometry, curve-preserving booleans, and cubic fitting reused for TypeFoundry stroke expansion. Manifests omit unrelated workspace/test dependencies. No absolute machine paths are needed to build.

@@ -27,6 +27,18 @@ foundry run --file commands.jsonl
 
 `open` also reads a folder of SVG glyphs named with four hex digits (`0041.svg` for A) and lines them up on a baseline and x-height. `open` and `save` read and write a project JSON file or a `.ufo` directory. `save` also writes an installable `.ttf` when the path ends in `.ttf`. `open` also reads a Three.js typeface JSON file (the json-fonts shape) and a webfontjson file (`callback({"css":"@font-face{...data:...}"})`). A webfontjson file may embed a `.ttf`, `.otf`, or WOFF 1 font. Those imports become a Type Foundry font in the session. A file with several `@font-face` rules imports the regular face. Embedded OpenType is refused. WOFF2 is unpacked like WOFF 1. Saving over `.otf`, `.woff`, or `.woff2` is refused. `check` and `blend` compare or blend JSON and UFO. JSON stays the working document. A UFO import keeps the default layer, sorts glyph names, and keeps the first Unicode value. It ignores anchors and guidelines. Kerning groups, kerning pairs, ligatures, and `features.fea` are kept. A save over an existing UFO updates fontinfo and the default layer and leaves lib data, images, and other layers in place. A component is flattened into its glyph on import, so the outline is kept but the reference is not. It refuses a glyph with an image, and it refuses a qcurve that is not exactly one off-curve point. One off-curve point is a quadratic. Two are a cubic. On the way out, the UFO family name is the font name. TrueType export turns cubics into quadratics, closes an open contour with a straight edge, and refuses a Unicode value outside the Basic Multilingual Plane.
 
+TTF `save` accepts `ttf_tolerance` (positive font units, default `0.5`):
+
+```json
+{"op":"save","path":"Wide.ttf","ttf_tolerance":0.5}
+```
+
+Its response includes `data.ttf`: `split_segments` (source cubics emitted as multiple quadratics), `quadratic_segments`, `max_error`, `tolerance`, `tolerance_exceeded`, and `max_tangent_break_degrees`. `max_error` is a conservative upper bound on source-to-output same-parameter distance, measured **after integer rounding and smooth-handle repair**, to within 0.0001 units. `tolerance_exceeded` counts source segments whose bound exceeds the tolerance. Integer quantization alone can exceed 0.5 units; such exports succeed with explicit diagnostics and `check_outlines` reports `ttf-error`. `ttf-kink` reports exported smooth joins above 1 degree. Invalid tolerances fail before writing or backing up files. JSON/UFO saves ignore this option.
+
+Cubic conversion uses tangent-preserving quadratic splines, with implied on-curve midpoints between consecutive off-curve controls. Smooth source knots retain explicit on-curve points, and their adjacent integer handles are fitted to a common lattice direction. A source quadratic (or one-quadratic cubic fit) whose two endpoints are smooth is split into two quadratics so each endpoint can be repaired independently. The drawing window and CLI save output show the split count and rounded error.
+
+For compatible static weights, use **`export_family` with all masters together**. Corresponding cubic segments are converted jointly at the default tolerance and use the same number of controls and identical on/off flags in every master; source smooth flags and topology must already match. The plan is deterministic and independent of master order. Independent single-font saves cannot infer other masters and can choose different counts. No variable-font file is generated yet. The Rust core also exposes `TtfOptions` and `Font::save_ttf_with_options` for a single export with its report.
+
 `open`, `check`, and `blend` also read binary fonts: `.ttf`, `.otf` (CFF or CFF2 outlines), and the first face of a `.ttc` or `.otc` collection. The import keeps glyph order, names from `post` or the CFF charset, the lowest Unicode value per glyph, advances, units per em, and the vertical metrics. Composite glyphs are decomposed. TrueType implied on-curve points become real on-curve points. A variable font gives its default instance. Horizontal kern pairs and GSUB ligatures are imported. Hinting, smooth flags, and other faces in a collection are not imported. A glyph without a stored name is called `uniXXXX`, or `glyphNNNNN` when it has no Unicode. `.woff` (WOFF 1) and `.woff2` (WOFF2, decoded with the pure-Rust `wuff` crate) are unpacked into an sfnt and then read the same way. A damaged WOFF2 is named in the error. Saving to `.otf`, `.ttc`, `.otc`, `.woff`, or `.woff2` is refused, so nothing writes JSON under a binary extension. TrueType export now stores glyph names (`post` format 2), so a saved `.ttf` opens with the same names. See `documents/font-formats.md`.
 
 `save`, `blend`, `save_family`, `export_family`, and `new` refuse to replace an existing file unless `force` is true. With `force`, the previous file is copied beside it as `name.bak` (or `name.bak2` when that already exists) and then replaced. Saving a `.ufo` does not delete `features.fea`, lib data, images, or other layers. The drawing window saves with `force`, because Save is an explicit overwrite. A command or MCP save stays strict.
@@ -252,6 +264,23 @@ Fonts keep an open `lib` map for foundry data. Keys we use today:
 {"op":"list_decisions"}
 ```
 
+### Letterform study
+
+`study` reads a font file or a folder of fonts, measures proportions, and writes a `typefoundry.study` version 1 JSON file. The file records stem, contrast, width, vertical metrics, overshoot, fitting, and how far a family's stem grows across weights. It does not record contours, points, or advances in font units. A later file with the same family, style name, weight, italic flag, and width class is a duplicate. Static desktop files are kept ahead of variable and web copies. A variable font only opens its default instance. `force` replaces an existing study and keeps `name.bak`. The open font is not changed.
+
+```json
+{"op":"study","path":"C:/fonts/reference","out":"C:/fonts/reference-study.json","force":false}
+```
+
+`fit_study` reads one family from a study and fits the open font to that face. It does not copy outlines. Lowercase letters scale about the baseline so x-height over cap height matches the face. Caps keep their height. Sidebearings of letters and figures become the face's fitting times this font's own stem. Vertical metrics come from the face and widen when the ink is outside them. Round overshoot is reported and left as drawn. `family` matches the full study name, or the name with a leading `Test ` ignored, so `The Future` selects `Test The Future` and not `Test The Future Mono`. No `style` uses the text face (roman, normal width, weight nearest 400). `weight` picks the roman nearest that weight, so 900 follows a heavy face when the family grows its x-height across weights. The edit can be undone.
+
+`study` on `fit_study` is a file path or a library name. `list_studies` and `foundry studies` list the library. The foundry reads the `studies` folder next to the Type Foundry source, then `%APPDATA%/Type Foundry/data/studies`. The same file name in both places uses the copy next to the source. A name can be the file stem (`klim-2026-10-17`) or a unique part of it (`klim`). An ambiguous name lists the matches. `foundry study` still requires `--out`. Put that file in either folder to use it later by name.
+
+```json
+{"op":"list_studies"}
+{"op":"fit_study","study":"klim-2026-10-17","family":"The Future","weight":400}
+```
+
 `proof` draws the open font to a PNG, or to a one-page vector PDF when the path ends in `.pdf`, with metric guides and advance boxes. The PDF keeps the curves and embeds no font. `compare` is a second font file drawn underneath. An empty `text` draws the encoded character set.
 
 ## Project file
@@ -273,6 +302,8 @@ foundry check narrow.json wide.json
 foundry blend narrow.json wide.json --t 0.5 --out mid.json --force
 foundry proof wide.json --out proof.png --text Hamburgefonts
 foundry diff narrow.json wide.json
+foundry studies
+foundry fit face.json --study klim-2026-10-17 --family "The Future" --out fitted.json
 ```
 
 `check` and `blend` exit 1 when the fonts are not compatible. `new`, `blend`, and `proof` take `--force` when the output already exists. `foundry run` writes JSON with non-ASCII characters escaped as `\u`, so PowerShell 5.1 can redirect it. A missing field is named in the error, for example a point that has no `smooth`.
@@ -339,6 +370,8 @@ Stdout carries only protocol messages, one JSON-RPC object per line. Logs go to 
 | `decision_list` | none | `list_decisions` |
 | `font_critique` | `min_gap?` | `critique` |
 | `critique_resolve` | `id`, `accepted`, plus optional decision fields | `resolve_critique` |
+| `study_library` | `path`, `out`, `force?`, `progress?` | `study` |
+| `study_fit` | `study` (path or library name), `family`, `style?`, `weight?` | `fit_study` |
 
 A tool result is `{"content":[{"type":"text","text":"..."}],"isError":false}`. The text is the command response JSON. `isError` is true when the command response has `ok: false`, or when the arguments do not fit the tool.
 
@@ -748,3 +781,64 @@ Calibration stays family-balanced in both views. Gap occupancy always checks all
 measured styles, so an existing bold or italic cannot be ignored simply because it
 is not the family representative. Briefs expose the closest measured face as well
 as three supporting family representatives.
+
+## Centerline stroke tool
+
+Glyphs optionally contain `strokes` beside `contours`. Legacy documents default to no strokes. JSON open/save preserves centerlines and all options. A stroke's `centerline` uses the existing contour/point representation: start with an on-curve point, use two off-curve handles for each cubic, and an on-curve endpoint. Lines are also accepted. For a closed cubic, the last two off-curve handles connect back to the first point. Coordinates are font units, y up. `left` and `right` are distances from the centerline (total width is their sum), relative to travel direction.
+
+```json
+{"op":"put_glyph","glyph":{"name":"test","advance":600,"contours":[]}}
+{"op":"stroke_add","name":"test","stroke":{"centerline":{"closed":false,"points":[{"x":50,"y":0,"kind":"on","smooth":false},{"x":50,"y":700,"kind":"on","smooth":false}]},"widths":[{"t":0,"left":40,"right":40},{"t":1,"left":40,"right":40}],"ease":"smooth","cap":"round","join":"miter","miter_limit":4}}
+{"op":"stroke_width","name":"test","index":0,"points":[{"t":0.5,"left":60,"right":45}]}
+{"op":"stroke_width","name":"test","index":0,"from_t":0.5,"points":[{"t":0.65,"left":60,"right":45}]}
+{"op":"stroke_width","name":"test","index":0,"preset":{"kind":"taper_end","amount":0.75}}
+{"op":"stroke_preview","names":["test"],"tolerance":0.5}
+{"op":"stroke_expand","names":["test"],"tolerance":0.5,"keep_strokes":true}
+{"op":"save","path":"stroke-study.json"}
+```
+
+- `stroke_add` appends to an existing glyph. `stroke_set` replaces a whole stroke using `name`, zero-based `index`, and `stroke` in the same shape as `stroke_add`. `stroke_remove` takes `name` and `index`.
+- `stroke_width` upserts `points` by their `t`; `from_t` removes a previous width point before inserting the new one, for a width-tool drag. All inputs validate before commit. `preset` is optional and applies after point edits.
+- `stroke_preview` and `stroke_expand` accept `names` (omit for all glyphs), positive `tolerance` (default **0.5 font units**), and `fixed_structure` (default false). Preview returns outlines without changing font state, history, or files. Expand is one undoable edit, staged across all target glyphs. `keep_strokes` defaults false and applies only when expanding. Re-expansion with retained strokes unions the resulting outlines with existing ink.
+- `widths` must be nonempty, strictly ordered, unique `t` in 0–1, and finite nonnegative left/right widths. Positions measure normalized centerline **arc length**, not a cubic's local parameter. Before/after the supplied profile range, widths stay at the nearest endpoint. Default widths are 40 units on each side. `ease` is `linear` (default) or `smooth` (cubic smoothstep between width points). Closed paths must have matching endpoint widths and nib angles.
+- Optional `angle` on width points is an absolute flat nib direction in degrees counterclockwise from +x. The centerline is swept with the asymmetric nib vector; omitted angles use the centerline's left normal. Angles interpolate numerically, so use a continuous angle range across 360° when needed.
+- `cap`: `butt` (default), `round`, `square`, or `angled`. Angled caps use `cap_angle`, measured from the perpendicular end cut; its magnitude must be less than 89°. `join`: `miter` (default), `round`, or `bevel`; `miter_limit` defaults 4 and must be at least 1. A miter exceeding the limit becomes a bevel. Closed centerlines have no caps.
+- Presets: `taper_start`, `taper_end`, and `taper_both` reduce the corresponding ends by `amount`; `swell` increases the midpoint by `amount`; `pinch` reduces width at `t` (default 0.5). `amount` is a fraction in 0–1. For example, amount 0.75 takes an 80-unit end to 20 units. Presets multiply the existing profile, keeping its asymmetry. Smooth/linear easing remains the stroke's choice.
+- `join_thinning: {"percent":15,"distance":60}` on a stroke detects open endpoints meeting another stroke's ink, reduces the joining stroke there, then eases to full width over `distance` font units. Only the stroke carrying this option thins. This endpoint helper does not thin arbitrary interior crossings. `percent` is 0–100.
+- `stem: "main"` makes left/right numbers fractions of the positive named value in the font JSON's `lib.stroke_stems`, for example `"lib":{"stroke_stems":{"main":80}}`. Omit `stem` for font units. A missing stem is an expansion error. Tolerance, centerline coordinates, and thinning distance always remain font units.
+
+Adaptive expansion reuses VectorCraft's width expander, curve-preserving boolean union, and cubic fitter. Overlaps between strokes and existing contours are merged, existing counters remain holes, winding is outer counterclockwise / holes clockwise, and cubics are split at horizontal and vertical extrema. Fitting keeps smooth tangents and avoids redundant anchors; sharp joins retain corner points. Adaptive outlines are deterministic for identical input/options, but **are not guaranteed blend-compatible across different widths**. Geometry that fails the existing intersection validator is rejected before any glyph changes.
+
+### Fixed structure and compatibility
+
+```json
+{"op":"stroke_preview","names":["test"],"fixed_structure":true,"tolerance":0.5}
+```
+
+Fixed structure supports **one smooth centerline with constant or variable left/right widths per glyph**, open or closed, with no existing contours, nib angle, angled cap, join thinning, or sharp segment joins. Both `linear` and `smooth` profile easing, asymmetric widths, taper/swell/pinch presets, and named-stem fractions work in fixed mode.
+
+Across masters, keep the centerline geometry, **width-point `t` positions**, easing, cap, and mode identical. The left/right width values may change independently; uniform scaling is not required. Profile knots are converted from normalized arc length into centerline segment boundaries. Fixed subdivisions use exact one-sided profile derivatives, preserving intended linear-profile corners and smooth-profile tangents. Each fitted cubic reserves five pieces for its possible x/y extrema; unused slots become deterministic subdivisions. Moving or newly appearing extrema therefore remain on-curve without changing point count, point kinds, or ordering. Round caps use the same extrema-slot scheme.
+
+Each fixed-mode glyph returns `structure_key`, an object describing its centerline, profile positions, easing, cap, collapsed endpoint caps, and layout version. **Compare these keys before blending expanded masters**; matching keys from successful expansions guarantee compatible contour/point layouts even when width values differ. The current layout is version **2**. Regenerate all masters together when updating from the earlier fixed-mode implementation. `compatible: true` and `fixed_structure: true` explicitly identify this guarantee. Adaptive mode does not return a structure key.
+
+```json
+{"op":"stroke_width","name":"test","index":0,"points":[{"t":0,"left":20,"right":30},{"t":0.5,"left":70,"right":50},{"t":1,"left":25,"right":30}]}
+{"op":"stroke_preview","names":["test"],"fixed_structure":true}
+```
+
+For another weight, keep these `t` positions and edit only `left`/`right` (or the named stem value), then preview/expand again in fixed mode. The outlines have the same structure key and can be passed to the existing compatibility/blend commands after expansion with `keep_strokes: false`.
+
+Fixed mode uses more cubics than adaptive fitting. It rejects failed fit budgets, local offset collapse, self-intersections, and collapsed interior profile points/intervals rather than altering the structure or silently switching modes. Zero-width open taper tips are supported: a collapsed endpoint omits its cap in every master. Keep the same zero-versus-positive endpoint pattern across masters; `structure_key.collapsed_caps` records that distinction. Unions still require adaptive mode. Matching structure keys guarantee structural compatibility, not that arbitrary edits or every interpolated/extrapolated outline will be free of intersections; run the usual outline checks on resulting blends. Tolerance controls the offset fit error and a requested weight fails when its fit cannot meet that budget.
+
+### Stroke responses and files
+
+All six commands return the standard `ok`/`error` JSON. Successful edits return `data.points` and `data.contours` for stored outlines, plus `strokes` and `centerline_points`. Expansion/preview return total point/contour counts and per-glyph `outlines`, counts, and `overshoot`: nonnegative extents below baseline and above x-height/cap-height. These extents report geometry, and do not move points or infer which metric zone a glyph was intended to reach. Errors include point/contour counts of zero for the failed operation.
+
+```json
+{"ok":true,"data":{"points":4,"contours":1,"fixed_structure":false,"compatible":false,"tolerance":0.5,"preview":true,"glyphs":[]}}
+{"ok":false,"error":"stroke index out of range","data":{"points":0,"contours":0}}
+```
+
+Commands operate in memory and never write files implicitly. Use `save` to persist; existing overwrite/backup protection still requires `force: true`. JSON is the authoring format. UFO/TTF export and blending refuse fonts with editable strokes to avoid dropping centerline data; expand with `keep_strokes: false` first. The editor's contour rendering does not display unexpanded strokes; use preview or expand to inspect ink.
+
+The MCP tools have the same names (`stroke_add`, `stroke_set`, `stroke_remove`, `stroke_width`, `stroke_expand`, `stroke_preview`), arguments, and JSON responses, and run through the same session commands as `foundry run`. The older `stroke` command / `path_stroke` MCP tool still makes outline/inline effects from existing contours.

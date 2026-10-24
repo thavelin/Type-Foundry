@@ -85,6 +85,7 @@ fn parse_glyph(key: &str, value: &Value) -> Result<Glyph, FoundryError> {
     }
     let outline = value.get("o").and_then(Value::as_str).unwrap_or("");
     Ok(Glyph {
+        strokes: Vec::new(),
         name: name.clone(),
         unicode,
         advance,

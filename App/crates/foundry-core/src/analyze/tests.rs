@@ -164,6 +164,7 @@ fn fixture(class: &str) -> Font {
             vec![polygon(&[(50., 0.), (100., 0.), (100., h), (50., h)])]
         };
         f.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: if c == ' ' {
                 "space".into()
             } else {
@@ -194,6 +195,7 @@ fn four_original_classes_and_stems() {
 #[test]
 fn exact_bounds_ignore_control_point_hull() {
     let g = Glyph {
+        strokes: Vec::new(),
         name: "arch".into(),
         unicode: None,
         advance: 1000.,
@@ -403,6 +405,7 @@ fn overlapping_rectangles_are_flagged() {
         p.y += 50.;
     }
     let g = Glyph {
+        strokes: Vec::new(),
         name: "overlap".into(),
         unicode: None,
         advance: 200.,
@@ -479,6 +482,7 @@ fn ink_area_uses_union_for_overlaps() {
         p.x += 50.;
     }
     let g = Glyph {
+        strokes: Vec::new(),
         name: "overlap".into(),
         unicode: None,
         advance: 200.,

@@ -1141,6 +1141,7 @@ mod tests {
             ],
         };
         let glyph = Glyph {
+            strokes: Vec::new(),
             name: "k".into(),
             unicode: None,
             advance: 200.0,
@@ -1156,6 +1157,7 @@ mod tests {
     fn smooth_is_idempotent_on_a_square() {
         let mut font = Font::new("S", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -1187,6 +1189,7 @@ mod tests {
     fn set_smooth_flags_without_family_refuses() {
         let mut font = Font::new("S", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "a".into(),
             unicode: None,
             advance: 100.0,

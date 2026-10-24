@@ -719,6 +719,7 @@ mod tests {
     fn writes_a_png_proof() {
         let mut font = Font::new("Proof", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -775,6 +776,7 @@ mod tests {
             smooth: false,
         };
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "O".into(),
             unicode: Some(u32::from('O')),
             advance: 600.0,

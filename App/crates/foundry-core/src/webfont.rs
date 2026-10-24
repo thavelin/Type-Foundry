@@ -108,6 +108,7 @@ pub(crate) fn load_binary_font(
             &glyphs,
         );
         glyphs.push(Glyph {
+            strokes: Vec::new(),
             name,
             unicode,
             advance: f64::from(face.glyph_hor_advance(id).unwrap_or(0)),
@@ -426,6 +427,7 @@ mod tests {
     fn square() -> Font {
         let mut font = Font::new("Square", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,

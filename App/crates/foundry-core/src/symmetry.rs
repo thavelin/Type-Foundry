@@ -850,6 +850,7 @@ mod tests {
     fn h_font() -> Font {
         let mut font = Font::new("H", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -921,6 +922,7 @@ mod tests {
     fn check_symmetry_reports_near_symmetric_o() {
         let mut font = Font::new("O", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "o".into(),
             unicode: Some(u32::from('o')),
             advance: 500.0,

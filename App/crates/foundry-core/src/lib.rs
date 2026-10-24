@@ -20,6 +20,12 @@ mod proof;
 mod save;
 mod sfnt;
 mod smooth;
+mod stroke;
+mod study;
+pub use stroke::{
+    Preset as StrokePresetOptions, Stroke, StrokeOptions, StrokePreset, WidthPoint, expand_strokes,
+    stroke_counts, stroke_edit, validate_stroke,
+};
 mod svgfont;
 mod symmetry;
 mod ttf;
@@ -59,7 +65,14 @@ pub use proof::{ProofOptions, write_proof};
 pub use smooth::{
     SmoothOptions, SmoothTarget, SmoothnessReport, check_smoothness, smooth_outlines,
 };
+pub use study::{
+    FamilyStudy, LetterformStudy, ListedStudy, ProportionFit, STUDY_FORMAT, STUDY_VERSION,
+    StudyFailure, StudyLibrary, apply_study, list_studies, read_study, resolve_study, select_face,
+    shipped_studies_dir, study_font, study_path, user_studies_dir, write_study,
+};
 pub use symmetry::{
     AxisSpec, MirrorOptions, SymmetrizeOptions, check_symmetry, glyph_from_mirror, mirror_glyphs,
     symmetrize_glyphs,
 };
+
+pub use ttf::{TtfOptions, TtfReport};

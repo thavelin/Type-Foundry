@@ -49,10 +49,12 @@ fn run(cli: args::Cli) -> Result<ExitCode, String> {
             let created = session.execute(Command::Create { name, upm });
             ensure_ok(created)?;
             let saved = session.execute(Command::Save {
+                ttf_tolerance: None,
                 path: path_string(&out),
                 force,
             });
-            ensure_ok(saved)?;
+            let data = ensure_ok(saved)?;
+            print_ttf_report(&data);
             println!("Wrote {}", out.display());
             Ok(ExitCode::SUCCESS)
         }
@@ -231,6 +233,58 @@ fn run(cli: args::Cli) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        args::Cli::Fit {
+            font,
+            study,
+            family,
+            style,
+            weight,
+            out,
+            force,
+        } => {
+            let mut session = Session::new();
+            let opened = session.execute(Command::Open {
+                path: path_string(&font),
+            });
+            ensure_ok(opened)?;
+            let response = session.execute(Command::FitStudy {
+                study: path_string(&study),
+                family,
+                style,
+                weight,
+            });
+            let data = ensure_ok(response)?;
+            print_fit(&data);
+            let saved = session.execute(Command::Save {
+                ttf_tolerance: None,
+                path: path_string(&out),
+                force,
+            });
+            let data = ensure_ok(saved)?;
+            print_ttf_report(&data);
+            println!("Wrote {}", out.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        args::Cli::Study { path, out, force } => {
+            eprintln!("Measuring letterforms. Outlines are not kept.");
+            let mut session = Session::new();
+            let response = session.execute(Command::Study {
+                path: path_string(&path),
+                out: path_string(&out),
+                force,
+                progress: true,
+            });
+            let data = ensure_ok(response)?;
+            print_study(&data);
+            Ok(ExitCode::SUCCESS)
+        }
+        args::Cli::Studies => {
+            let mut session = Session::new();
+            let response = session.execute(Command::ListStudies);
+            let data = ensure_ok(response)?;
+            print_studies(&data);
+            Ok(ExitCode::SUCCESS)
+        }
         args::Cli::Run { file } => run_stream(file),
         args::Cli::Mcp => {
             let stdin = io::stdin();
@@ -274,6 +328,114 @@ fn ensure_ok(response: foundry_api::Response) -> Result<serde_json::Value, Strin
         Err(response
             .error
             .unwrap_or_else(|| "command failed".to_string()))
+    }
+}
+
+fn print_ttf_report(data: &serde_json::Value) {
+    if let Some(report) = data.get("ttf").filter(|r| r.is_object()) {
+        println!(
+            "TTF: {} cubics split; max error {:.3} units; {} segments exceed tolerance after rounding",
+            report["split_segments"].as_u64().unwrap_or(0),
+            report["max_error"].as_f64().unwrap_or(0.0),
+            report["tolerance_exceeded"].as_u64().unwrap_or(0)
+        );
+    }
+}
+
+fn print_fit(data: &serde_json::Value) {
+    println!(
+        "Fitted to {} {}",
+        data["family"].as_str().unwrap_or(""),
+        data["style"].as_str().unwrap_or("")
+    );
+    println!(
+        "x/cap {:.3} -> {:.3}, lowercase scale {:.3}",
+        data["x_over_cap_before"].as_f64().unwrap_or(0.0),
+        data["x_over_cap_after"].as_f64().unwrap_or(0.0),
+        data["scale"].as_f64().unwrap_or(0.0)
+    );
+    if let Some(bearing) = data["sidebearing"].as_f64() {
+        println!("sidebearing {bearing:.1}");
+    }
+    println!(
+        "ascender {:.1}, cap {:.1}, x-height {:.1}, descender {:.1}",
+        data["ascender"].as_f64().unwrap_or(0.0),
+        data["cap_height"].as_f64().unwrap_or(0.0),
+        data["x_height"].as_f64().unwrap_or(0.0),
+        data["descender"].as_f64().unwrap_or(0.0)
+    );
+    match (
+        data["overshoot_drawn"].as_f64(),
+        data["overshoot_study"].as_f64(),
+    ) {
+        (Some(drawn), Some(target)) => println!(
+            "o overshoot is {drawn:.3} of the em; the study face is {target:.3}. Outlines were not reshaped to match it."
+        ),
+        (None, Some(target)) => println!(
+            "The study face overshoots by {target:.3} of the em. This font has no o to compare."
+        ),
+        _ => {}
+    }
+}
+
+fn print_studies(data: &serde_json::Value) {
+    let Some(studies) = data["studies"].as_array() else {
+        println!("No studies.");
+        return;
+    };
+    if studies.is_empty() {
+        println!("No studies.");
+        println!(
+            "Add a typefoundry.study file under the Type Foundry studies folder, or pass --out to foundry study."
+        );
+        return;
+    }
+    for study in studies {
+        println!(
+            "{}  {} faces, {} families  {}",
+            study["name"].as_str().unwrap_or(""),
+            study["faces"].as_u64().unwrap_or(0),
+            study["families"].as_u64().unwrap_or(0),
+            study["path"].as_str().unwrap_or("")
+        );
+    }
+}
+
+fn print_study(data: &serde_json::Value) {
+    println!("Wrote {}", data["path"].as_str().unwrap_or("the study"));
+    println!(
+        "{} faces, {} families, {} duplicates",
+        data["faces"].as_u64().unwrap_or(0),
+        data["families"].as_u64().unwrap_or(0),
+        data["duplicates"].as_u64().unwrap_or(0)
+    );
+    if let Some(notes) = data["notes"].as_array() {
+        for note in notes {
+            if let Some(line) = note.as_str() {
+                println!("{line}");
+            }
+        }
+    }
+    if let Some(families) = data["family_notes"].as_array() {
+        println!();
+        for family in families {
+            if let Some(line) = family.as_str() {
+                println!("{line}");
+            }
+        }
+    }
+    if let Some(failed) = data["failed"].as_array()
+        && !failed.is_empty()
+    {
+        println!();
+        println!("{} files could not be read", failed.len());
+        for failure in failed.iter().take(12) {
+            println!(
+                "{}: {}",
+                failure["path"].as_str().unwrap_or(""),
+                failure["reason"].as_str().unwrap_or("")
+            );
+        }
     }
 }
 

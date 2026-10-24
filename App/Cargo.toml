@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/vectorcraft"]
 members = [
     "crates/foundry-core",
     "crates/foundry-api",

@@ -13,8 +13,102 @@ use crate::error::FoundryError;
 use crate::font::{Contour, Font, Glyph, Point, PointKind};
 
 const MAC_EPOCH_OFFSET: u64 = 2_082_844_800;
-const QUAD_ERROR: f64 = 1.0;
-const MAX_SPLIT: u32 = 8;
+/// Conversion accuracy in source font units, before integer quantization.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TtfOptions {
+    pub tolerance: f64,
+}
+
+impl Default for TtfOptions {
+    fn default() -> Self {
+        Self { tolerance: 0.5 }
+    }
+}
+
+/// Error is measured against the final integer outline, including smooth-handle repair.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TtfReport {
+    pub split_segments: usize,
+    pub quadratic_segments: usize,
+    pub max_error: f64,
+    pub tolerance: f64,
+    pub tolerance_exceeded: usize,
+    pub max_tangent_break_degrees: f64,
+}
+
+type Plan = BTreeMap<(String, usize, usize), Vec<kurbo::Point>>;
+
+fn conversion_plans(fonts: &[&Font], options: TtfOptions) -> Result<Vec<Plan>, FoundryError> {
+    if !options.tolerance.is_finite() || options.tolerance <= 0.0 {
+        return Err(FoundryError::Ttf(
+            "TTF tolerance must be finite and positive".into(),
+        ));
+    }
+    let mut groups: BTreeMap<_, Vec<(usize, kurbo::CubicBez)>> = BTreeMap::new();
+    let mut force_two = std::collections::BTreeSet::new();
+    for (fi, font) in fonts.iter().enumerate() {
+        for glyph in &font.glyphs {
+            for (ci, contour) in glyph.contours.iter().enumerate() {
+                let ons = on_indexes(contour);
+                let count = if contour.closed {
+                    ons.len()
+                } else {
+                    ons.len().saturating_sub(1)
+                };
+                for si in 0..count {
+                    let a = ons[si];
+                    let b = ons[(si + 1) % ons.len()];
+                    let offs = between(contour, a, b);
+                    if offs.len() == 2 {
+                        if contour.points[a].smooth && contour.points[b].smooth {
+                            force_two.insert((glyph.name.clone(), ci, si));
+                        }
+                        let point = |p: &Point| kurbo::Point::new(p.x, p.y);
+                        let curve = kurbo::CubicBez::new(
+                            point(&contour.points[a]),
+                            point(offs[0]),
+                            point(offs[1]),
+                            point(&contour.points[b]),
+                        );
+                        groups
+                            .entry((glyph.name.clone(), ci, si))
+                            .or_default()
+                            .push((fi, curve));
+                    }
+                }
+            }
+        }
+    }
+    let mut plans = vec![Plan::new(); fonts.len()];
+    for (key, group) in groups {
+        let curves: Vec<_> = group.iter().map(|(_, c)| *c).collect();
+        // All corresponding master curves are fitted together, never independently.
+        // Reserve half the budget for integer rounding.
+        let splines = kurbo::cubics_to_quadratic_splines(&curves, options.tolerance * 0.5)
+            .ok_or_else(|| {
+                FoundryError::Ttf(format!(
+                    "cannot approximate {} contour {} segment {} at tolerance {}",
+                    key.0, key.1, key.2, options.tolerance
+                ))
+            })?;
+        for ((fi, _), spline) in group.iter().zip(splines) {
+            let mut points = spline.points().to_vec();
+            if points.len() == 3 && force_two.contains(&key) {
+                // Two independent endpoint handles avoid one rounding repair
+                // changing the tangent at the other end of a one-quad cubic.
+                points = vec![
+                    points[0],
+                    points[0].midpoint(points[1]),
+                    points[1].midpoint(points[2]),
+                    points[2],
+                ];
+            }
+            plans[*fi].insert(key.clone(), points);
+        }
+    }
+    Ok(plans)
+}
 
 pub(crate) fn is_ttf_path(path: &Path) -> bool {
     path.extension()
@@ -34,7 +128,38 @@ pub(crate) fn save_ttf(font: &Font, path: &Path) -> Result<(), FoundryError> {
 }
 
 pub(crate) fn write_ttf(font: &Font) -> Result<Vec<u8>, FoundryError> {
-    let glyphs = build_glyphs(font)?;
+    let (bytes, _) = write_ttf_options(font, TtfOptions::default())?;
+    Ok(bytes)
+}
+
+pub(crate) fn write_ttf_options(
+    font: &Font,
+    options: TtfOptions,
+) -> Result<(Vec<u8>, TtfReport), FoundryError> {
+    let plans = conversion_plans(&[font], options)?;
+    write_planned(font, &plans[0], options)
+}
+
+pub(crate) fn write_ttf_family(fonts: &[&Font]) -> Result<Vec<Vec<u8>>, FoundryError> {
+    let options = TtfOptions::default();
+    let plans = conversion_plans(fonts, options)?;
+    fonts
+        .iter()
+        .zip(&plans)
+        .map(|(font, plan)| write_planned(font, plan, options).map(|(bytes, _)| bytes))
+        .collect()
+}
+
+fn write_planned(
+    font: &Font,
+    plan: &Plan,
+    options: TtfOptions,
+) -> Result<(Vec<u8>, TtfReport), FoundryError> {
+    let mut report = TtfReport {
+        tolerance: options.tolerance,
+        ..TtfReport::default()
+    };
+    let glyphs = build_glyphs(font, plan, &mut report)?;
     let bounds = font_bounds(&glyphs);
     let encoded: Vec<EncodedGlyph> = glyphs.iter().map(encode_glyph).collect();
     let mut glyf = Vec::new();
@@ -76,7 +201,68 @@ pub(crate) fn write_ttf(font: &Font) -> Result<Vec<u8>, FoundryError> {
         tables.insert(*b"GSUB", gsub);
     }
 
-    assemble(tables)
+    Ok((assemble(tables)?, report))
+}
+
+pub(crate) fn outline_issues(font: &Font) -> Vec<crate::OutlineIssue> {
+    let options = TtfOptions::default();
+    let plans = match conversion_plans(&[font], options) {
+        Ok(plans) => plans,
+        Err(error) => {
+            return vec![crate::OutlineIssue {
+                code: "ttf-conversion",
+                glyph: String::new(),
+                contour: None,
+                point: None,
+                detail: error.to_string(),
+            }];
+        }
+    };
+    let mut issues = Vec::new();
+    for glyph in &font.glyphs {
+        for (ci, contour) in glyph.contours.iter().enumerate() {
+            let mut report = TtfReport {
+                tolerance: options.tolerance,
+                ..TtfReport::default()
+            };
+            match draw_contour(contour, &glyph.name, ci, &plans[0], &mut report) {
+                Err(error) => issues.push(crate::OutlineIssue {
+                    code: "ttf-conversion",
+                    glyph: glyph.name.clone(),
+                    contour: Some(ci),
+                    point: None,
+                    detail: error.to_string(),
+                }),
+                Ok(_) => {
+                    if report.tolerance_exceeded > 0 {
+                        issues.push(crate::OutlineIssue {
+                            code: "ttf-error",
+                            glyph: glyph.name.clone(),
+                            contour: Some(ci),
+                            point: None,
+                            detail: format!(
+                                "rounded TTF error bound {:.4} exceeds {:.4} units",
+                                report.max_error, report.tolerance
+                            ),
+                        });
+                    }
+                    if report.max_tangent_break_degrees > 1.0 {
+                        issues.push(crate::OutlineIssue {
+                            code: "ttf-kink",
+                            glyph: glyph.name.clone(),
+                            contour: Some(ci),
+                            point: None,
+                            detail: format!(
+                                "rounded TTF smooth tangent turns {:.4} degrees",
+                                report.max_tangent_break_degrees
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    issues
 }
 
 struct BuiltGlyph {
@@ -105,10 +291,14 @@ struct Bounds {
     y_max: i16,
 }
 
-fn build_glyphs(font: &Font) -> Result<Vec<BuiltGlyph>, FoundryError> {
+fn build_glyphs(
+    font: &Font,
+    plan: &Plan,
+    report: &mut TtfReport,
+) -> Result<Vec<BuiltGlyph>, FoundryError> {
     let mut glyphs = Vec::new();
     if let Some(notdef) = font.glyphs.iter().find(|glyph| glyph.name == ".notdef") {
-        glyphs.push(build_glyph(notdef)?);
+        glyphs.push(build_glyph(notdef, plan, report)?);
     } else {
         glyphs.push(BuiltGlyph {
             advance: fit_advance(f64::from(font.upm) / 2.0, ".notdef")?,
@@ -122,7 +312,7 @@ fn build_glyphs(font: &Font) -> Result<Vec<BuiltGlyph>, FoundryError> {
         if glyph.name == ".notdef" {
             continue;
         }
-        glyphs.push(build_glyph(glyph)?);
+        glyphs.push(build_glyph(glyph, plan, report)?);
     }
     if glyphs.len() > usize::from(u16::MAX) {
         return Err(FoundryError::Ttf(
@@ -132,10 +322,22 @@ fn build_glyphs(font: &Font) -> Result<Vec<BuiltGlyph>, FoundryError> {
     Ok(glyphs)
 }
 
-fn build_glyph(glyph: &Glyph) -> Result<BuiltGlyph, FoundryError> {
+fn build_glyph(
+    glyph: &Glyph,
+    plan: &Plan,
+    report: &mut TtfReport,
+) -> Result<BuiltGlyph, FoundryError> {
     let mut contours = Vec::new();
-    for contour in &glyph.contours {
-        contours.push(draw_contour(contour, &glyph.name)?);
+    for (ci, contour) in glyph.contours.iter().enumerate() {
+        contours.push(draw_contour(contour, &glyph.name, ci, plan, report)?);
+    }
+    if contours.len() > i16::MAX as usize
+        || contours.iter().map(Vec::len).sum::<usize>() > u16::MAX as usize
+    {
+        return Err(FoundryError::Ttf(format!(
+            "glyph {} exceeds TrueType contour/point limits after conversion",
+            glyph.name
+        )));
     }
     let lsb = contours
         .iter()
@@ -152,7 +354,13 @@ fn build_glyph(glyph: &Glyph) -> Result<BuiltGlyph, FoundryError> {
     })
 }
 
-fn draw_contour(contour: &Contour, glyph_name: &str) -> Result<Vec<DrawPoint>, FoundryError> {
+fn draw_contour(
+    contour: &Contour,
+    glyph_name: &str,
+    ci: usize,
+    plan: &Plan,
+    report: &mut TtfReport,
+) -> Result<Vec<DrawPoint>, FoundryError> {
     let on_indexes = on_indexes(contour);
     if on_indexes.is_empty() {
         return Err(FoundryError::Ttf(format!(
@@ -172,30 +380,131 @@ fn draw_contour(contour: &Contour, glyph_name: &str) -> Result<Vec<DrawPoint>, F
     } else {
         on_indexes.len() - 1
     };
+    let mut records = Vec::new();
+    let mut knots = vec![0];
     for segment in 0..segments {
         let from = on_indexes[segment % on_indexes.len()];
         let to = on_indexes[(segment + 1) % on_indexes.len()];
         let closing = contour.closed && segment + 1 == segments;
         let offs = between(contour, from, to);
+        let first = drawn.len();
         match offs.len() {
             0 => {}
-            1 => drawn.push(draw_off(offs[0], glyph_name)?),
-            2 => drawn.extend(approximate_cubic(
-                &contour.points[from],
-                offs[0],
-                offs[1],
-                &contour.points[to],
-                glyph_name,
-            )?),
+            1 if !(contour.points[from].smooth && contour.points[to].smooth) => {
+                drawn.push(DrawPoint {
+                    x: fit_i16(offs[0].x, glyph_name)?,
+                    y: fit_i16(offs[0].y, glyph_name)?,
+                    on: false,
+                });
+                report.quadratic_segments += 1;
+            }
+            1 => {
+                let control = kurbo::Point::new(offs[0].x, offs[0].y);
+                let a = kurbo::Point::new(contour.points[from].x, contour.points[from].y)
+                    .midpoint(control);
+                let b =
+                    kurbo::Point::new(contour.points[to].x, contour.points[to].y).midpoint(control);
+                for p in [a, b] {
+                    drawn.push(DrawPoint {
+                        x: fit_i16(p.x, glyph_name)?,
+                        y: fit_i16(p.y, glyph_name)?,
+                        on: false,
+                    });
+                }
+                report.quadratic_segments += 2;
+            }
+            2 => {
+                let spline = &plan[&(glyph_name.to_string(), ci, segment)];
+                let n = spline.len() - 2;
+                report.split_segments += usize::from(n > 1);
+                report.quadratic_segments += n;
+                for p in &spline[1..spline.len() - 1] {
+                    drawn.push(DrawPoint {
+                        x: fit_i16(p.x, glyph_name)?,
+                        y: fit_i16(p.y, glyph_name)?,
+                        on: false,
+                    });
+                }
+            }
             count => {
                 return Err(FoundryError::Ttf(format!(
                     "glyph {glyph_name} has a segment with {count} off-curve points"
                 )));
             }
         }
+        let end = if closing { 0 } else { drawn.len() };
+        records.push((from, to, first, end));
         if !closing {
+            knots.push(drawn.len());
             drawn.push(draw_on(&contour.points[to], glyph_name)?);
         }
+    }
+    // Keep original knots explicit: conditional omission here would change topology
+    // between masters. Only the spline's internal knots are implied.
+    for (&source, &index) in on_indexes.iter().zip(&knots) {
+        if contour.points[source].smooth
+            && (contour.closed || (index > 0 && index + 1 < drawn.len()))
+        {
+            repair_smooth(&mut drawn, index);
+            let prev = (index + drawn.len() - 1) % drawn.len();
+            let next = (index + 1) % drawn.len();
+            let a = draw_position(&drawn[index]) - draw_position(&drawn[prev]);
+            let b = draw_position(&drawn[next]) - draw_position(&drawn[index]);
+            if a.hypot2() > 0.0 && b.hypot2() > 0.0 {
+                let degrees = (a.dot(b) / (a.hypot() * b.hypot()))
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees();
+                report.max_tangent_break_degrees = report.max_tangent_break_degrees.max(degrees);
+            }
+        }
+    }
+    for (from, to, first, end) in records {
+        let offs = between(contour, from, to);
+        let point = |p: &Point| kurbo::Point::new(p.x, p.y);
+        let a = point(&contour.points[from]);
+        let b = point(&contour.points[to]);
+        let source = match offs.as_slice() {
+            [] => kurbo::CubicBez::new(a, a.lerp(b, 1.0 / 3.0), a.lerp(b, 2.0 / 3.0), b),
+            [c] => kurbo::QuadBez::new(a, point(c), b).raise(),
+            [c, d] => kurbo::CubicBez::new(a, point(c), point(d), b),
+            _ => unreachable!(),
+        };
+        let start_index = first - 1;
+        let last = if end == 0 { drawn.len() } else { end };
+        let start = draw_position(&drawn[start_index]);
+        let finish = draw_position(&drawn[end]);
+        let controls: Vec<_> = drawn[first..last].iter().map(draw_position).collect();
+        let error = if controls.is_empty() {
+            curve_error(
+                source,
+                kurbo::CubicBez::new(
+                    start,
+                    start.lerp(finish, 1.0 / 3.0),
+                    start.lerp(finish, 2.0 / 3.0),
+                    finish,
+                ),
+            )
+        } else {
+            let mut points = vec![start];
+            points.extend(controls);
+            points.push(finish);
+            let spline = kurbo::QuadSpline::new(points);
+            let n = spline.points().len() - 2;
+            use kurbo::ParamCurve;
+            spline
+                .to_quads()
+                .enumerate()
+                .map(|(i, q)| {
+                    curve_error(
+                        source.subsegment(i as f64 / n as f64..(i + 1) as f64 / n as f64),
+                        q.raise(),
+                    )
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        report.max_error = report.max_error.max(error);
+        report.tolerance_exceeded += usize::from(error > report.tolerance);
     }
     if drawn.is_empty() {
         return Err(FoundryError::Ttf(format!(
@@ -205,100 +514,128 @@ fn draw_contour(contour: &Contour, glyph_name: &str) -> Result<Vec<DrawPoint>, F
     Ok(drawn)
 }
 
-fn approximate_cubic(
-    start: &Point,
-    control_a: &Point,
-    control_b: &Point,
-    end: &Point,
-    glyph_name: &str,
-) -> Result<Vec<DrawPoint>, FoundryError> {
-    let points = flatten_cubic(
-        (start.x, start.y),
-        (control_a.x, control_a.y),
-        (control_b.x, control_b.y),
-        (end.x, end.y),
-        0,
-    );
-    points
-        .into_iter()
-        .map(|(x, y, on)| {
-            Ok(DrawPoint {
-                x: fit_i16(x, glyph_name)?,
-                y: fit_i16(y, glyph_name)?,
-                on,
-            })
-        })
-        .collect()
-}
-
-fn flatten_cubic(
-    p0: (f64, f64),
-    c1: (f64, f64),
-    c2: (f64, f64),
-    p3: (f64, f64),
-    depth: u32,
-) -> Vec<(f64, f64, bool)> {
-    let mid = cubic_at(p0, c1, c2, p3, 0.5);
-    let control = (
-        2.0 * mid.0 - 0.5 * (p0.0 + p3.0),
-        2.0 * mid.1 - 0.5 * (p0.1 + p3.1),
-    );
-    let error = dist(
-        cubic_at(p0, c1, c2, p3, 0.25),
-        quad_at(p0, control, p3, 0.25),
-    )
-    .max(dist(
-        cubic_at(p0, c1, c2, p3, 0.75),
-        quad_at(p0, control, p3, 0.75),
-    ));
-    if error <= QUAD_ERROR || depth >= MAX_SPLIT {
-        return vec![(control.0, control.1, false)];
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
     }
-    let (left, right) = split_cubic(p0, c1, c2, p3);
-    let mut points = flatten_cubic(left.0, left.1, left.2, left.3, depth + 1);
-    points.push((mid.0, mid.1, true));
-    points.extend(flatten_cubic(right.0, right.1, right.2, right.3, depth + 1));
-    points
+    a
 }
 
-type Cubic = ((f64, f64), (f64, f64), (f64, f64), (f64, f64));
-
-fn split_cubic(p0: (f64, f64), c1: (f64, f64), c2: (f64, f64), p3: (f64, f64)) -> (Cubic, Cubic) {
-    let p01 = mid(p0, c1);
-    let p12 = mid(c1, c2);
-    let p23 = mid(c2, p3);
-    let p012 = mid(p01, p12);
-    let p123 = mid(p12, p23);
-    let p0123 = mid(p012, p123);
-    ((p0, p01, p012, p0123), (p0123, p123, p23, p3))
+fn draw_position(p: &DrawPoint) -> kurbo::Point {
+    kurbo::Point::new(f64::from(p.x), f64::from(p.y))
 }
 
-fn cubic_at(p0: (f64, f64), c1: (f64, f64), c2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
-    let u = 1.0 - t;
-    let uu = u * u;
-    let tt = t * t;
-    (
-        uu * u * p0.0 + 3.0 * uu * t * c1.0 + 3.0 * u * tt * c2.0 + tt * t * p3.0,
-        uu * u * p0.1 + 3.0 * uu * t * c1.1 + 3.0 * u * tt * c2.1 + tt * t * p3.1,
-    )
+// Integer controls on the same primitive lattice direction remain exactly collinear.
+// Minimize displacement from the already fitted controls. Quantization can make the
+// requested tolerance impossible; the report exposes that rather than hiding it.
+fn repair_smooth(points: &mut [DrawPoint], index: usize) {
+    let len = points.len();
+    let prev = (index + len - 1) % len;
+    let next = (index + 1) % len;
+    if points[prev].on && points[next].on {
+        return;
+    }
+    if points[prev].on || points[next].on {
+        let origin = draw_position(&points[index]);
+        let (fixed, moving, sign) = if points[prev].on {
+            (prev, next, 1.0)
+        } else {
+            (next, prev, -1.0)
+        };
+        let vector = (origin - draw_position(&points[fixed])) * sign;
+        let dx = vector.x as i32;
+        let dy = vector.y as i32;
+        let divisor = gcd(dx.unsigned_abs(), dy.unsigned_abs());
+        if divisor == 0 {
+            return;
+        }
+        let direction = vector / f64::from(divisor);
+        let offset = (draw_position(&points[moving]) - origin) * sign;
+        if offset.dot(direction) <= 0.0 {
+            return;
+        }
+        let scale = (offset.dot(direction) / direction.hypot2())
+            .round()
+            .max(1.0);
+        let target = origin + direction * (scale * sign);
+        if [target.x, target.y]
+            .iter()
+            .all(|x| *x >= f64::from(i16::MIN) && *x <= f64::from(i16::MAX))
+        {
+            points[moving].x = target.x as i16;
+            points[moving].y = target.y as i16;
+        }
+        return;
+    }
+    let origin = draw_position(&points[index]);
+    let a = origin - draw_position(&points[prev]);
+    let b = draw_position(&points[next]) - origin;
+    if a.hypot2() == 0.0 || b.hypot2() == 0.0 || a.dot(b) <= 0.0 {
+        return;
+    }
+    if a.cross(b) == 0.0 {
+        return;
+    }
+    let mut best = (f64::INFINITY, a, b);
+    // Include the original integer vectors, and rational directions up to 32 units.
+    let candidates = (-32..=32)
+        .flat_map(|x| (-32..=32).map(move |y| kurbo::Vec2::new(f64::from(x), f64::from(y))));
+    for v in candidates.chain([a, b]) {
+        if v.hypot2() == 0.0 || v.dot(a) <= 0.0 || v.dot(b) <= 0.0 {
+            continue;
+        }
+        let va = v * (a.dot(v) / v.hypot2()).round().max(1.0);
+        let vb = v * (b.dot(v) / v.hypot2()).round().max(1.0);
+        let pa = origin - va;
+        let pb = origin + vb;
+        if [pa.x, pa.y, pb.x, pb.y]
+            .iter()
+            .any(|x| *x < f64::from(i16::MIN) || *x > f64::from(i16::MAX))
+        {
+            continue;
+        }
+        let score = (va - a).hypot2() + (vb - b).hypot2();
+        if score < best.0 {
+            best = (score, va, vb);
+        }
+    }
+    if best.0.is_finite() {
+        let pa = origin - best.1;
+        let pb = origin + best.2;
+        points[prev].x = pa.x as i16;
+        points[prev].y = pa.y as i16;
+        points[next].x = pb.x as i16;
+        points[next].y = pb.y as i16;
+    }
 }
 
-fn quad_at(p0: (f64, f64), control: (f64, f64), p2: (f64, f64), t: f64) -> (f64, f64) {
-    let u = 1.0 - t;
-    (
-        u * u * p0.0 + 2.0 * u * t * control.0 + t * t * p2.0,
-        u * u * p0.1 + 2.0 * u * t * control.1 + t * t * p2.1,
-    )
-}
-
-fn mid(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
-}
-
-fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
-    let dx = a.0 - b.0;
-    let dy = a.1 - b.1;
-    dx.hypot(dy)
+/// Certified upper bound on the same-parameter distance. Subdivide the difference
+/// Bezier until its convex-hull bound is within 0.0001 units of a sampled lower bound.
+fn curve_error(a: kurbo::CubicBez, b: kurbo::CubicBez) -> f64 {
+    let diff = kurbo::CubicBez::new(
+        (a.p0 - b.p0).to_point(),
+        (a.p1 - b.p1).to_point(),
+        (a.p2 - b.p2).to_point(),
+        (a.p3 - b.p3).to_point(),
+    );
+    fn bound(c: kurbo::CubicBez, depth: u32) -> f64 {
+        use kurbo::ParamCurve;
+        let upper = [c.p0, c.p1, c.p2, c.p3]
+            .iter()
+            .map(|p| p.to_vec2().hypot())
+            .fold(0.0_f64, f64::max);
+        let lower =
+            c.p0.to_vec2()
+                .hypot()
+                .max(c.p3.to_vec2().hypot())
+                .max(c.eval(0.5).to_vec2().hypot());
+        if upper - lower < 0.0001 || depth == 16 {
+            return upper;
+        }
+        let (l, r) = c.subdivide();
+        bound(l, depth + 1).max(bound(r, depth + 1))
+    }
+    bound(diff, 0)
 }
 
 fn on_indexes(contour: &Contour) -> Vec<usize> {
@@ -333,14 +670,6 @@ fn draw_on(point: &Point, glyph_name: &str) -> Result<DrawPoint, FoundryError> {
         x: fit_i16(point.x, glyph_name)?,
         y: fit_i16(point.y, glyph_name)?,
         on: true,
-    })
-}
-
-fn draw_off(point: &Point, glyph_name: &str) -> Result<DrawPoint, FoundryError> {
-    Ok(DrawPoint {
-        x: fit_i16(point.x, glyph_name)?,
-        y: fit_i16(point.y, glyph_name)?,
-        on: false,
     })
 }
 
@@ -1273,6 +1602,7 @@ mod tests {
         let path = dir.join("square.ttf");
         let mut font = Font::new("Square", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -1347,6 +1677,7 @@ mod tests {
         font.info.vendor = "VSTK".into();
         font.info.unique_id = "vostok-4.5".into();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "H".into(),
             unicode: Some(u32::from('H')),
             advance: 400.0,
@@ -1394,6 +1725,7 @@ mod tests {
     fn an_odd_glyph_still_lands_on_an_even_offset() {
         let mut font = Font::new("Odd", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "l".into(),
             unicode: Some(u32::from('l')),
             advance: 200.0,
@@ -1415,6 +1747,7 @@ mod tests {
     fn converts_a_cubic_into_quadratics() {
         let mut font = Font::new("Curve", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "C".into(),
             unicode: Some(u32::from('C')),
             advance: 500.0,
@@ -1447,10 +1780,207 @@ mod tests {
         assert!(top > 140.0, "curve peak {top} is too flat");
     }
 
+    fn circle_font(scale: f64) -> Font {
+        let mut font = Font::new("Spline", 1000).unwrap();
+        let mut points = vec![
+            on(200.0, 0.0),
+            off(200.0, 110.0),
+            off(110.0, 200.0),
+            on(0.0, 200.0),
+            off(-110.0, 200.0),
+            off(-200.0, 110.0),
+            on(-200.0, 0.0),
+            off(-200.0, -110.0),
+            off(-110.0, -200.0),
+            on(0.0, -200.0),
+            off(110.0, -200.0),
+            off(200.0, -110.0),
+        ];
+        for p in &mut points {
+            p.x *= scale;
+            p.y *= scale;
+            p.smooth = p.kind == PointKind::On;
+        }
+        font.insert_glyph(Glyph {
+            name: "a".into(),
+            unicode: Some(97),
+            advance: 500.0,
+            contours: vec![Contour {
+                closed: true,
+                points,
+            }],
+            strokes: Vec::new(),
+        })
+        .unwrap();
+        font
+    }
+
+    #[derive(Default)]
+    struct Quads {
+        start: kurbo::Point,
+        current: kurbo::Point,
+        curves: Vec<kurbo::QuadBez>,
+    }
+    impl OutlineBuilder for Quads {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.start = kurbo::Point::new(f64::from(x), f64::from(y));
+            self.current = self.start;
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.current = kurbo::Point::new(f64::from(x), f64::from(y));
+        }
+        fn quad_to(&mut self, x: f32, y: f32, ex: f32, ey: f32) {
+            let end = kurbo::Point::new(f64::from(ex), f64::from(ey));
+            self.curves.push(kurbo::QuadBez::new(
+                self.current,
+                kurbo::Point::new(f64::from(x), f64::from(y)),
+                end,
+            ));
+            self.current = end;
+        }
+        fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
+            panic!("TTF contains a cubic");
+        }
+        fn close(&mut self) {
+            self.current = self.start;
+        }
+    }
+
+    #[test]
+    fn check_outlines_exported_splines_are_smooth_and_accurate() {
+        use kurbo::ParamCurve;
+        let font = circle_font(1.0);
+        let (bytes, report) = write_ttf_options(&font, TtfOptions::default()).unwrap();
+        assert_eq!(report.split_segments, 4);
+        assert!(report.max_error <= 0.5, "{report:?}");
+        assert_eq!(report.tolerance_exceeded, 0);
+        let face = Face::parse(&bytes, 0).unwrap();
+        let mut ink = Quads::default();
+        face.outline_glyph(face.glyph_index('a').unwrap(), &mut ink)
+            .unwrap();
+        for i in 0..ink.curves.len() {
+            let a = ink.curves[i];
+            let b = ink.curves[(i + 1) % ink.curves.len()];
+            let incoming = a.p2 - a.p1;
+            let outgoing = b.p1 - b.p0;
+            let degrees = (incoming.dot(outgoing) / (incoming.hypot() * outgoing.hypot()))
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            assert!(degrees <= 1.0, "exported tangent break {degrees}");
+        }
+        let plans = conversion_plans(&[&font], TtfOptions::default()).unwrap();
+        let mut offset = 0;
+        let points = &font.glyphs[0].contours[0].points;
+        for si in 0..4 {
+            let n = plans[0][&("a".into(), 0, si)].len() - 2;
+            let p = |i: usize| kurbo::Point::new(points[i % 12].x, points[i % 12].y);
+            let source =
+                kurbo::CubicBez::new(p(si * 3), p(si * 3 + 1), p(si * 3 + 2), p(si * 3 + 3));
+            for j in 0..n {
+                for step in 0..=100 {
+                    let t = f64::from(step) / 100.0;
+                    let error = source
+                        .eval((j as f64 + t) / n as f64)
+                        .distance(ink.curves[offset + j].eval(t));
+                    assert!(error <= 0.5, "actual exported error {error}");
+                }
+            }
+            offset += n;
+        }
+        assert!(
+            !crate::check_outlines(&font)
+                .iter()
+                .any(|i| i.code == "ttf-kink" || i.code == "ttf-error")
+        );
+    }
+
+    #[test]
+    fn compatible_masters_share_quadratic_structure() {
+        let light = circle_font(0.25);
+        let bold = circle_font(2.0);
+        let bytes = write_ttf_family(&[&light, &bold]).unwrap();
+        let counts: Vec<_> = bytes
+            .iter()
+            .map(|bytes| {
+                let face = Face::parse(bytes, 0).unwrap();
+                let mut ink = Quads::default();
+                face.outline_glyph(face.glyph_index('a').unwrap(), &mut ink)
+                    .unwrap();
+                ink.curves.len()
+            })
+            .collect();
+        assert_eq!(counts[0], counts[1]);
+        let plans = conversion_plans(&[&light, &bold], TtfOptions::default()).unwrap();
+        let repeat = conversion_plans(&[&bold, &light], TtfOptions::default()).unwrap();
+        assert_eq!(plans[0], repeat[1]);
+        let mut a = TtfReport::default();
+        let mut b = TtfReport::default();
+        let ga = build_glyphs(&light, &plans[0], &mut a).unwrap();
+        let gb = build_glyphs(&bold, &plans[1], &mut b).unwrap();
+        let flags = |g: &BuiltGlyph| {
+            g.contours
+                .iter()
+                .flatten()
+                .map(|p| p.on)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(flags(&ga[1]), flags(&gb[1]));
+        assert!(ga[1].contours[0].windows(2).any(|p| !p[0].on && !p[1].on));
+    }
+
+    #[test]
+    fn quantization_error_is_reported_and_invalid_tolerances_are_rejected() {
+        let mut font = circle_font(1.0);
+        for p in &mut font.glyphs[0].contours[0].points {
+            p.x += 0.49;
+            p.y += 0.49;
+        }
+        let (_, report) = write_ttf_options(&font, TtfOptions { tolerance: 0.01 }).unwrap();
+        assert!(report.max_error > 0.01);
+        assert!(report.tolerance_exceeded > 0);
+        for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(write_ttf_options(&font, TtfOptions { tolerance }).is_err());
+        }
+        let coarse = conversion_plans(&[&font], TtfOptions { tolerance: 2.0 }).unwrap();
+        let fine = conversion_plans(&[&font], TtfOptions { tolerance: 0.1 }).unwrap();
+        assert!(
+            fine[0].values().map(Vec::len).sum::<usize>()
+                > coarse[0].values().map(Vec::len).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn rounding_repairs_oblique_smooth_handles_exactly() {
+        let mut points = vec![
+            DrawPoint {
+                x: -40,
+                y: -13,
+                on: false,
+            },
+            DrawPoint {
+                x: 0,
+                y: 0,
+                on: true,
+            },
+            DrawPoint {
+                x: 24,
+                y: 8,
+                on: false,
+            },
+        ];
+        repair_smooth(&mut points, 1);
+        let a = draw_position(&points[1]) - draw_position(&points[0]);
+        let b = draw_position(&points[2]) - draw_position(&points[1]);
+        assert_eq!(a.cross(b), 0.0);
+        assert!(a.dot(b) > 0.0);
+    }
+
     #[test]
     fn refuses_a_character_outside_the_bmp() {
         let mut font = Font::new("Wide", 1000).unwrap();
         font.insert_glyph(Glyph {
+            strokes: Vec::new(),
             name: "uni1F600".into(),
             unicode: Some(0x1F600),
             advance: 600.0,

@@ -65,6 +65,21 @@ pub enum Cli {
     Run {
         file: Option<PathBuf>,
     },
+    Study {
+        path: PathBuf,
+        out: PathBuf,
+        force: bool,
+    },
+    Studies,
+    Fit {
+        font: PathBuf,
+        study: PathBuf,
+        family: String,
+        style: Option<String>,
+        weight: Option<u16>,
+        out: PathBuf,
+        force: bool,
+    },
     Mcp,
     Version,
 }
@@ -91,6 +106,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         "proof" => parse_proof(parsed),
         "diff" => parse_diff(parsed),
         "run" => parse_run(parsed),
+        "study" => parse_study(parsed),
+        "studies" => parse_studies(parsed),
+        "fit" => parse_fit(parsed),
         "mcp" => parse_mcp(parsed),
         other => Err(format!("unknown command {other}")),
     }
@@ -337,6 +355,49 @@ fn parse_diff(parsed: Parsed) -> Result<Cli, String> {
     Ok(Cli::Diff { a, b })
 }
 
+fn parse_study(mut parsed: Parsed) -> Result<Cli, String> {
+    require_positionals(&parsed, 1, "study")?;
+    let path = PathBuf::from(parsed.positionals[0].clone());
+    let out = PathBuf::from(take_required(&mut parsed, "out")?);
+    let force = take_bool(&mut parsed, "force", false)?;
+    reject_unknown(parsed)?;
+    Ok(Cli::Study { path, out, force })
+}
+
+fn parse_studies(parsed: Parsed) -> Result<Cli, String> {
+    require_positionals(&parsed, 0, "studies")?;
+    reject_unknown(parsed)?;
+    Ok(Cli::Studies)
+}
+
+fn parse_fit(mut parsed: Parsed) -> Result<Cli, String> {
+    require_positionals(&parsed, 1, "fit")?;
+    let font = PathBuf::from(parsed.positionals[0].clone());
+    let study = PathBuf::from(take_required(&mut parsed, "study")?);
+    let family = take_required(&mut parsed, "family")?;
+    let style = parsed.flags.remove("style");
+    let weight = match parsed.flags.remove("weight") {
+        Some(value) => Some(
+            value
+                .parse::<u16>()
+                .map_err(|_| format!("--weight must be a whole number, got {value}"))?,
+        ),
+        None => None,
+    };
+    let out = PathBuf::from(take_required(&mut parsed, "out")?);
+    let force = take_bool(&mut parsed, "force", false)?;
+    reject_unknown(parsed)?;
+    Ok(Cli::Fit {
+        font,
+        study,
+        family,
+        style,
+        weight,
+        out,
+        force,
+    })
+}
+
 fn parse_run(mut parsed: Parsed) -> Result<Cli, String> {
     require_positionals(&parsed, 0, "run")?;
     let file = parsed.flags.remove("file").map(PathBuf::from);
@@ -430,10 +491,16 @@ foundry — local type foundry commands
   foundry blend A B [--t 0.5] --out FILE [--force]
   foundry proof FILE --out IMAGE [--text TEXT] [--pixel-size 72] [--compare OTHER] [--force]
   foundry diff A B
+  foundry studies
+  foundry study PATH --out FILE [--force]
+  foundry fit FONT --study STUDY --family NAME [--style NAME] [--weight N] --out FILE [--force]
   foundry run [--file FILE]
   foundry mcp
 
 FILE, A, and B can be .json, .ufo, .ttf, .otf, .ttc, .otc, .woff, or a folder of SVG glyphs named 0041.svg. --out writes .json, .ufo, or .ttf. proof writes a PNG. --force replaces an existing file and keeps the previous one as name.bak.
+`studies` lists study files kept with the Type Foundry and under %APPDATA%/Type Foundry/data/studies. The Type Foundry copy wins when the name is the same.
+`study` measures letterform proportions in a font or a folder and writes them to FILE. Outlines are not stored. A repeated face is skipped. Pass --force to replace FILE. Put FILE in one of those study folders to use it later by name.
+`fit` reads one family from a study and applies its x-height ratio, fitting, and vertical metrics to FONT. STUDY is a file or a library name such as klim-2026-10-17. Caps stay. Lowercase scales. Outlines are not copied. `--family The Future` matches a study family named `Test The Future`. No `--style` uses the text face. `--weight 900` picks the roman nearest that weight.
 `run` reads JSON commands from stdin, or from --file. See documents/api.md.
 `mcp` serves the same session as a stdio MCP server, like the foundry-mcp binary.
 "
@@ -487,8 +554,25 @@ mod tests {
         );
         assert!(parse(&args("blend a.json --out mid.json")).is_err());
         assert!(parse(&args("new --name Wide")).is_err());
+        assert_eq!(parse(&args("studies")).unwrap(), Cli::Studies);
+        assert!(parse(&args("studies extra")).is_err());
         assert_eq!(parse(&args("mcp")).unwrap(), Cli::Mcp);
         assert!(parse(&args("mcp extra")).is_err());
+        assert_eq!(
+            parse(&args(
+                "fit face.json --study study.json --family Future --weight 900 --out fitted.json"
+            ))
+            .unwrap(),
+            Cli::Fit {
+                font: PathBuf::from("face.json"),
+                study: PathBuf::from("study.json"),
+                family: "Future".into(),
+                style: None,
+                weight: Some(900),
+                out: PathBuf::from("fitted.json"),
+                force: false,
+            }
+        );
     }
 }
 #[cfg(test)]
