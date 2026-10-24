@@ -27,7 +27,10 @@
       "const": 1
     },
     "embedding": {
-      "const": "measured-font-space-v1"
+      "enum": [
+        "measured-font-space-v1",
+        "measured-font-space-v2"
+      ]
     },
     "space_id": {
       "type": "string",
@@ -137,6 +140,9 @@
             "type": "number",
             "minimum": 0,
             "maximum": 1
+          },
+          "revision": {
+            "type": "string"
           }
         }
       }
@@ -218,6 +224,15 @@
           },
           "label_source": {
             "type": "string"
+          },
+          "revisions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         }
       }

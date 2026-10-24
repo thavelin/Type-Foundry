@@ -240,17 +240,18 @@ pub(super) fn write(
                 let sc = 150. / b.height().max(1.);
                 let left = 45. + i as f64 * 235.;
                 draw(&mut image, g, left, 675., sc, [220, 225, 231, 255]);
-                for j in 1..65 {
-                    let y = b.y0 + b.height() * j as f64 / 65.;
-                    for (a, z) in o.intervals(y, false) {
-                        let weight = ((z - a) / xh * 3.).clamp(0., 1.);
-                        line(
-                            &mut image,
-                            ((left + a * sc) as f32, (675. - y * sc) as f32),
-                            ((left + z * sc) as f32, (675. - y * sc) as f32),
-                            [(230. * weight) as u8, 75, (230. * (1. - weight)) as u8, 255],
-                            1.5,
-                        );
+                for seg in o.paths.iter().flat_map(|p| p.segments()) {
+                    for j in 1..=24 {
+                        if let Some((a, z)) = o.normal_span(seg, (j as f64 - 0.5) / 24.) {
+                            let weight = (a.distance(z) / xh * 3.).clamp(0., 1.);
+                            line(
+                                &mut image,
+                                ((left + a.x * sc) as f32, (675. - a.y * sc) as f32),
+                                ((left + z.x * sc) as f32, (675. - z.y * sc) as f32),
+                                [(230. * weight) as u8, 75, (230. * (1. - weight)) as u8, 255],
+                                1.5,
+                            );
+                        }
                     }
                 }
             }

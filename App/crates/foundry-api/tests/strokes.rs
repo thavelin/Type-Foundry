@@ -141,7 +141,7 @@ fn variable_fixed_preview_expand_and_master_compatibility() {
         let data = expanded.data.unwrap();
         assert_eq!(data["compatible"], true);
         assert_eq!(data["glyphs"], preview.data.unwrap()["glyphs"]);
-        assert_eq!(data["glyphs"][0]["structure_key"]["version"], 2);
+        assert_eq!(data["glyphs"][0]["structure_key"]["version"], 3);
         keys.push(data["glyphs"][0]["structure_key"].clone());
         counts.push(data["points"].clone());
         masters.push(s.font().unwrap().clone());

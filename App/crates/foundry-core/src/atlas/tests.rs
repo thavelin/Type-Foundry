@@ -407,3 +407,48 @@ fn reviewed_family_aliases_group_legacy_style_names() {
     assert!(a.families[0].grouping_notes[0].contains("PostScript"));
     assert_eq!(a.space_id.len(), 64);
 }
+
+#[test]
+fn revisions_group_versions_without_losing_iterations() {
+    let t = Temp::new();
+    let a = study("Vostok Serif v3", 1, 400);
+    let b = study("Vostok Serif v4.7", 2, 400);
+    let mut c = study("Quarra Sans", 3, 400);
+    c.source.path = "fonts/round7a/Quarra-Regular.ttf".into();
+    let mut d = study("Quarra Sans", 4, 400);
+    d.source.path = "fonts/round7b/Quarra-Regular.ttf".into();
+    let p = t.report("revisions.json", &[a, b, c, d]);
+    let atlas = build(&[p], &Options::default()).unwrap();
+    assert_eq!(atlas.families.len(), 2);
+    for f in &atlas.families {
+        assert_eq!(f.revisions.len(), 2);
+        assert_eq!(f.faces.len(), 2);
+    }
+    let vostok = atlas
+        .families
+        .iter()
+        .find(|f| f.name == "Vostok Serif")
+        .unwrap();
+    assert!(vostok.revisions.contains_key("v4.7"));
+    assert_eq!(family_revision("Font 2000"), ("Font 2000", None));
+    assert_eq!(family_revision("Font vNext"), ("Font vNext", None));
+}
+#[test]
+fn class_briefs_search_beyond_global_shortlist() {
+    let t = Temp::new();
+    let sources: Vec<_> = (0..24)
+        .map(|i| study(&format!("Family {i}"), i, 400))
+        .collect();
+    let p = t.report("gaps.json", &sources);
+    let mut a = build(&[p], &Options::default()).unwrap();
+    assert!(!a.gaps.is_empty());
+    let class = a.gaps[0]["class"].as_str().unwrap().to_string();
+    a.gaps.clear();
+    let briefs = class_briefs(&a, &class, 5);
+    assert!(!briefs.is_empty());
+    assert!(
+        briefs
+            .iter()
+            .all(|g| g["class"] == class && g["minimum_distance"].as_f64().unwrap() >= 0.25)
+    );
+}

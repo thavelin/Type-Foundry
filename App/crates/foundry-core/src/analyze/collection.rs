@@ -1,13 +1,4 @@
 use super::*;
-const FEATURES: &[(&str, f64)] = &[
-    ("proportions.x_cap", 0.15),
-    ("proportions.cap_upm", 0.15),
-    ("weight.stem_x_height", 0.08),
-    ("stems.contrast", 1.),
-    ("widths.o_x", 0.25),
-    ("serif.presence_score", 0.4),
-    ("widths.n.advance_relative_H", 0.2),
-];
 fn normalized(m: &Metric) -> Option<f64> {
     if m.units == "font_units" {
         m.x_height_ratio
@@ -46,6 +37,36 @@ fn ranges(fonts: &[&Study]) -> Value {
     Value::Object(out)
 }
 pub(super) fn nearest(target: &Study, fonts: &[Study]) -> Vec<Value> {
+    use crate::atlas::embedding;
+    // Fit one representative per family, so extra weights don't dominate normalization.
+    let mut representatives: BTreeMap<String, &Study> = BTreeMap::new();
+    let rank = |s: &Study| {
+        (
+            s.metadata["italic_angle"].as_f64().unwrap_or(0.) != 0.,
+            s.metadata["weight_class"]
+                .as_i64()
+                .unwrap_or(400)
+                .abs_diff(400),
+        )
+    };
+    for s in fonts {
+        let key = s.metadata["family"].as_str().unwrap_or("").to_lowercase();
+        representatives
+            .entry(key)
+            .and_modify(|old| {
+                if rank(s) < rank(old) {
+                    *old = s;
+                }
+            })
+            .or_insert(s);
+    }
+    let rows: Vec<_> = representatives
+        .values()
+        .map(|s| embedding::extract(s))
+        .collect();
+    let dims = embedding::fit_rows(&rows);
+    let raw = embedding::extract(target);
+    let (tv, tm) = embedding::encode(&raw, &dims);
     let mut matches = Vec::new();
     for other in fonts {
         if target.metadata["family"] == other.metadata["family"]
@@ -55,23 +76,22 @@ pub(super) fn nearest(target: &Study, fonts: &[Study]) -> Vec<Value> {
         {
             continue;
         }
-        let mut diffs = Vec::new();
-        for (k, scale) in FEATURES {
-            if let Some((a, b)) = target
-                .metrics
-                .get(*k)
-                .and_then(normalized)
-                .zip(other.metrics.get(*k).and_then(normalized))
-            {
-                diffs.push((*k, a, b, (a - b) / scale));
-            }
-        }
-        if diffs.len() < 4 {
+        let other_raw = embedding::extract(other);
+        let (ov, om) = embedding::encode(&other_raw, &dims);
+        let Some((distance, shared)) = embedding::distance(&tv, &tm, &ov, &om, &dims, 12) else {
             continue;
-        }
-        let distance = (diffs.iter().map(|d| d.3 * d.3).sum::<f64>() / diffs.len() as f64).sqrt();
-        diffs.sort_by(|a, b| b.3.abs().total_cmp(&a.3.abs()));
-        matches.push((distance,label(other),json!({"source":other.source,"family":other.metadata["family"],"distance":distance,"compared_features":diffs.len(),"method":"RMS feature differences divided by fixed scales; at least 4 shared features","differences":diffs.iter().take(3).map(|d|json!({"metric":d.0,"target":d.1,"other":d.2,"standardized_difference":d.3})).collect::<Vec<_>>()})));
+        };
+        let mut diffs: Vec<_> = dims
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| tm[*i] && om[*i])
+            .map(|(i, d)| (i, (tv[i] - ov[i]).abs(), d))
+            .collect();
+        diffs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        matches.push((distance,label(other),json!({"source":other.source,"family":other.metadata["family"],
+            "distance":distance,"compared_features":shared,"dimensions":dims.len(),"embedding":crate::atlas::EMBEDDING,
+            "method":"atlas 33-dimension transforms, masks and domain-balanced RMS; family-balanced fit to reference collection; >=12 shared dimensions across >=4 domains; distances comparable only within this fitted collection",
+            "differences":diffs.iter().take(4).map(|(i,_,d)|json!({"metric":d.key,"target":raw[*i],"other":other_raw[*i],"standardized_difference":tv[*i]-ov[*i]})).collect::<Vec<_>>()})));
     }
     matches.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     let mut seen = std::collections::BTreeSet::new();

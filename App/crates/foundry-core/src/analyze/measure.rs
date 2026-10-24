@@ -149,45 +149,40 @@ pub(super) fn study(font: &Font, source: Source, mut metadata: Value, options: &
         "lowercase vertical stem / x-height",
         &["n"],
     );
-    // Radial thickness and stress: sample 180 directions about the o bounding-box centre.
-    let stress = shape('o').zip(bound('o')).and_then(|(o, b)| {
-        o.inner()?;
-        let center = kurbo::Point::new((b.x0 + b.x1) * 0.5, (b.y0 + b.y1) * 0.5);
-        let radius = b.width().max(b.height());
+    // Measure perpendicular to the contour: radial spans confound ellipse shape with weight.
+    let stress = shape('o').and_then(|o| {
+        let inner = o.inner()?;
         let mut samples = Vec::new();
-        for angle in 0..180 {
-            let a = (angle as f64).to_radians();
-            let d = kurbo::Vec2::new(a.cos(), a.sin());
-            let line = kurbo::Line::new(center, center + d * radius);
-            let mut hits: Vec<_> = o
-                .paths
-                .iter()
-                .flat_map(|p| p.segments())
-                .flat_map(|s| {
-                    s.intersect_line(line)
-                        .into_iter()
-                        .map(move |h| s.eval(h.segment_t).distance(center))
-                })
-                .collect();
-            hits.sort_by(f64::total_cmp);
-            hits.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-            if hits.len() == 2 {
-                samples.push((angle as f64, hits[1] - hits[0]));
+        for path in &o.paths {
+            if std::ptr::eq(path, inner) {
+                continue;
+            }
+            for seg in path.segments() {
+                for j in 1..=32 {
+                    let t = (j as f64 - 0.5) / 32.;
+                    if let Some((a, b)) = o.normal_span(seg, t) {
+                        samples.push(((b - a).y.atan2((b - a).x).to_degrees(), a.distance(b)));
+                    }
+                }
             }
         }
-        let min = samples.iter().min_by(|a, b| a.1.total_cmp(&b.1))?;
-        let max = samples.iter().map(|p| p.1).max_by(f64::total_cmp)?;
-        if max / min.1 < 1.01 {
+        samples.sort_by(|a, b| a.1.total_cmp(&b.1));
+        if samples.len() < 16 {
+            return None;
+        }
+        let low = samples[samples.len() / 20];
+        let high = samples[samples.len() * 19 / 20];
+        if low.1 <= 1e-6 || high.1 / low.1 < 1.08 {
             None
         } else {
-            Some(min.0 - 90.)
+            Some((low.0 - 90. + 90.).rem_euclid(180.) - 90.)
         }
     });
     add(
         "stems.stress_angle",
         stress,
         "degrees",
-        "thinnest o radial span; 180 rays; degrees from vertical; null for monoline ambiguity",
+        "o boundary-normal thickness, 32 samples/segment; 5th/95th percentiles; null below 8% modulation; degrees from vertical",
         &["o"],
     );
     for c in ['o', 'O', 's', 'a'] {
@@ -681,7 +676,7 @@ pub(super) fn study(font: &Font, source: Source, mut metadata: Value, options: &
             complete = false;
         }
     }
-    metrics.insert("spacing.texture_greyness".into(),Metric::new(if complete {ratio(Some(area),Some(advance*(font.metrics.ascender-font.metrics.descender)))}else{None},"ratio","sum outline ink areas / (unshaped advances * declared ascender-descender); standard ASCII pangram plus digits; no kerning",&[text],xh,cp));
+    metrics.insert("spacing.texture_greyness".into(),Metric::new(if complete {ratio(Some(area),Some(advance*font.upm as f64))}else{None},"ratio","sum outline ink areas / (unshaped advances * UPM); standard ASCII pangram plus digits; no kerning",&[text],xh,cp));
     if bulk
         && !complete
         && let Some(m) = metrics.get_mut("spacing.texture_greyness")
@@ -697,6 +692,29 @@ pub(super) fn study(font: &Font, source: Source, mut metadata: Value, options: &
             .get(&c.to_string())
             .and_then(|v| v["angle"].as_f64());
         metrics.insert(format!("terminals.{c}.end_cut_angle"),Metric::new(value,"degrees","short straight cuts bounded by corners in expected opening region; heuristic; see terminals map",&[&c.to_string()],xh,cp));
+    }
+    for c in ['c', 'C', 'e'] {
+        let aperture = shape(c).zip(bound(c)).and_then(|(o, b)| {
+            let spans = o.intervals(b.x0 + b.width() * 0.85, true);
+            let mut gaps: Vec<_> = spans
+                .windows(2)
+                .map(|w| w[1].0 - w[0].1)
+                .filter(|g| *g > 0.)
+                .collect();
+            gaps.sort_by(f64::total_cmp);
+            gaps.last().map(|g| g / b.height())
+        });
+        metrics.insert(
+            format!("aperture.{c}.opening_ratio"),
+            Metric::new(
+                aperture,
+                "ratio",
+                "largest vertical opening between filled spans at 85% ink width / ink height",
+                &[&c.to_string()],
+                xh,
+                cp,
+            ),
+        );
     }
     let (radius, rises) = super::advanced::n_inner(font, xh);
     metrics.insert(

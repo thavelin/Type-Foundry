@@ -614,63 +614,137 @@ fn raw_outline(
         width::width_outline(&bp, 2.0, &profile, &style, tol * 0.05)
     };
     if s.cap == StrokeCap::Angled && !s.centerline.closed {
-        // Slant the terminal cross-sections around their centerline endpoints.
+        // Trim each side locally to the tilted cut, extending the outgoing side.
+        // Moving just the cap vertices folds the dense side samples into little islands.
         use kurbo::PathEl;
-        for t in [0.0, 1.0] {
+        let mut ring: Vec<_> = raw
+            .elements()
+            .iter()
+            .filter_map(|el| match el {
+                PathEl::MoveTo(p) | PathEl::LineTo(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        if ring.len() > 1 && ring[0].distance(*ring.last().unwrap()) < 1e-8 {
+            ring.pop();
+        }
+        for t in [0., 1.] {
             let (p, v) = arc.at(t * arc.len());
             let normal = Vec2::new(-v.y, v.x);
-            for el in raw.elements_mut() {
-                let q = match el {
-                    PathEl::MoveTo(q) | PathEl::LineTo(q) => q,
-                    _ => continue,
-                };
-                let w = sample_width(s, t);
-                let a = w
-                    .angle
-                    .unwrap_or(v.y.atan2(v.x).to_degrees() + 90.0)
-                    .to_radians();
-                let n = Vec2::new(a.cos(), a.sin());
-                if q.distance(p + n * (w.left * k)) < 1e-6
-                    || q.distance(p - n * (w.right * k)) < 1e-6
-                {
-                    *q += v * ((*q - p).dot(normal) * s.cap_angle.to_radians().tan());
-                }
+            let w = sample_width(s, t);
+            let angle = w
+                .angle
+                .unwrap_or(v.y.atan2(v.x).to_degrees() + 90.)
+                .to_radians();
+            let n = Vec2::new(angle.cos(), angle.sin());
+            let targets = [p + n * (w.left * k), p - n * (w.right * k)];
+            let ids: Vec<_> = targets
+                .iter()
+                .map(|q| {
+                    (0..ring.len())
+                        .min_by(|a, b| ring[*a].distance(*q).total_cmp(&ring[*b].distance(*q)))
+                        .unwrap()
+                })
+                .collect();
+            if ids[0] == ids[1] {
+                return Err(err("angled cap has collapsed endpoints"));
             }
+            let len = ring.len();
+            if (ids[0] + 1) % len != ids[1] && (ids[1] + 1) % len != ids[0] {
+                return Err(err("cannot identify angled terminal cross-section"));
+            }
+            let slope = s.cap_angle.to_radians().tan();
+            let inward = if t == 0. { v } else { -v };
+            let plane = (v - normal * slope) * if t == 0. { 1. } else { -1. };
+            let extension = (w.left.max(w.right) * k * (slope.abs() + 1.) + tol).max(tol);
+            let mut drop = vec![false; len];
+            let mut replacements = vec![];
+            for side in 0..2 {
+                let start = ids[side];
+                let other = ids[1 - side];
+                let step = if (start + 1) % len == other {
+                    len - 1
+                } else {
+                    1
+                };
+                let mut before = targets[side] - inward * extension;
+                let mut index = start;
+                let mut hit = None;
+                for _ in 0..len {
+                    let q = if index == start {
+                        targets[side]
+                    } else {
+                        ring[index]
+                    };
+                    let a = (before - p).dot(plane);
+                    let b = (q - p).dot(plane);
+                    if b >= -1e-9 {
+                        hit = Some(if (b - a).abs() > 1e-12 {
+                            before.lerp(q, (-a / (b - a)).clamp(0., 1.))
+                        } else {
+                            q
+                        });
+                        break;
+                    }
+                    drop[index] = true;
+                    before = q;
+                    index = (index + step) % len;
+                    if index == other {
+                        break;
+                    }
+                }
+                replacements.push((
+                    start,
+                    hit.ok_or_else(|| err("angled cut consumes the entire stroke"))?,
+                ));
+            }
+            ring = ring
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, q)| {
+                    replacements
+                        .iter()
+                        .find(|(at, _)| *at == i)
+                        .map(|(_, p)| *p)
+                        .or_else(|| (!drop[i]).then_some(q))
+                })
+                .collect();
         }
+        raw = BezPath::new();
+        raw.move_to(ring[0]);
+        for p in &ring[1..] {
+            raw.line_to(*p);
+        }
+        raw.close_path();
     }
     Ok(raw)
 }
 
-/// A cubic has at most four interior extrema (two per axis). Unused slots are
-/// deterministic subdivisions, so extrema appearing/disappearing never change structure.
 fn fixed_cubic_parts(c: kurbo::CubicBez) -> Vec<kurbo::CubicBez> {
-    let mut cuts = vec![0.0, 1.0];
+    let mut cuts = vec![0., 1.];
     cuts.extend(
         c.extrema()
             .into_iter()
-            .filter(|t| *t > 1e-8 && *t < 1.0 - 1e-8),
+            .filter(|t| *t > 1e-8 && *t < 1. - 1e-8),
     );
     cuts.sort_by(f64::total_cmp);
     cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-8);
     while cuts.len() < 6 {
-        let mut widest = 0;
-        for j in 1..cuts.len() - 1 {
-            if cuts[j + 1] - cuts[j] > cuts[widest + 1] - cuts[widest] {
-                widest = j;
-            }
-        }
+        let widest = (0..cuts.len() - 1)
+            .max_by(|a, b| (cuts[*a + 1] - cuts[*a]).total_cmp(&(cuts[*b + 1] - cuts[*b])))
+            .unwrap();
         cuts.insert(widest + 1, (cuts[widest] + cuts[widest + 1]) * 0.5);
     }
     cuts.windows(2).map(|w| c.subsegment(w[0]..w[1])).collect()
 }
+// Fixed mode uses source/profile intervals and a constant subdivision count across
+// weights. Avoid reserving unused extrema slots: each one used to multiply points by five.
 fn append_fixed_cubic(raw: &mut BezPath, c: kurbo::CubicBez) {
     for c in fixed_cubic_parts(c) {
         raw.curve_to(c.p1, c.p2, c.p3);
     }
 }
-/// Fixed-layout cubic offset fitting. Profile knots are arc-length landmarks. Each fit
-/// interval reserves five pieces (a cubic has at most four x/y extrema), so moving extrema
-/// cannot change point counts. No normalization or adaptive refitting may change this layout.
+/// Fixed-layout offset fitting. Width changes never change the segment count or kind.
 fn fixed_outline(font: &Font, s: &Stroke, tol: f64) -> Result<Vec<Contour>, FoundryError> {
     use kurbo::{CubicBez, ParamCurveArclen, ParamCurveDeriv};
     validate_stroke(s)?;
@@ -817,7 +891,14 @@ fn fixed_outline(font: &Font, s: &Stroke, tol: f64) -> Result<Vec<Contour>, Foun
                             ));
                         }
                     }
-                    chain.extend(fixed_cubic_parts(c));
+                    let straight = matches!(seg, PathSeg::Line(_)) && s.ease == WidthEase::Linear;
+                    if straight {
+                        chain.push(PathSeg::Line(kurbo::Line::new(p0, p3)));
+                    } else if constant(s) && s.ease == WidthEase::Linear {
+                        chain.push(PathSeg::Cubic(c));
+                    } else {
+                        chain.extend(fixed_cubic_parts(c).into_iter().map(PathSeg::Cubic));
+                    }
                 }
             }
         }
@@ -826,9 +907,14 @@ fn fixed_outline(font: &Font, s: &Stroke, tol: f64) -> Result<Vec<Contour>, Foun
     let start_width = sample_width(s, 0.0);
     let end_width = sample_width(s, 1.0);
     let mut raw = BezPath::new();
-    raw.move_to(sides[0][0].p0);
-    for c in &sides[0] {
-        raw.curve_to(c.p1, c.p2, c.p3);
+    raw.move_to(sides[0][0].start());
+    let append = |raw: &mut BezPath, seg: PathSeg| match seg {
+        PathSeg::Line(l) => raw.line_to(l.p1),
+        PathSeg::Cubic(c) => raw.curve_to(c.p1, c.p2, c.p3),
+        PathSeg::Quad(q) => raw.quad_to(q.p1, q.p2),
+    };
+    for seg in &sides[0] {
+        append(&mut raw, *seg);
     }
     let cap = |raw: &mut BezPath, p: kurbo::Point, v: Vec2, n: Vec2, a: f64, b: f64| {
         let r = (a + b) / 2.0;
@@ -855,7 +941,7 @@ fn fixed_outline(font: &Font, s: &Stroke, tol: f64) -> Result<Vec<Contour>, Foun
     };
     if s.centerline.closed {
         raw.close_path();
-        raw.move_to(sides[1].last().unwrap().p3);
+        raw.move_to(sides[1].last().unwrap().end());
     } else {
         let seg = *segs.last().unwrap();
         let p = seg.end();
@@ -869,8 +955,8 @@ fn fixed_outline(font: &Font, s: &Stroke, tol: f64) -> Result<Vec<Contour>, Foun
             end_width.right * k,
         );
     }
-    for c in sides[1].iter().rev() {
-        raw.curve_to(c.p2, c.p1, c.p0);
+    for seg in sides[1].iter().rev() {
+        append(&mut raw, seg.reverse());
     }
     if !s.centerline.closed {
         let seg = segs[0];
@@ -885,25 +971,13 @@ fn fixed_outline(font: &Font, s: &Stroke, tol: f64) -> Result<Vec<Contour>, Foun
         );
     }
     raw.close_path();
-    // Extrema already occupy reserved slots. Preserve all other slots and their ordering.
-    let mut out = vec![];
-    for sp in PathData::from_bezpath(&raw).subpaths {
-        let mut pts = vec![];
-        for a in &sp.anchors {
-            pts.push(point(a.p, PointKind::On));
-            pts.push(point(a.h_out, PointKind::Off));
-            let next = &sp.anchors[(pts.len() / 3 + 1) % sp.anchors.len()];
-            pts.push(point(next.h_in, PointKind::Off));
-        }
-        out.push(Contour {
-            closed: true,
-            points: pts,
-        });
-    }
-    Ok(out)
+    Ok(outline_contours(&PathData::from_bezpath(&raw), false))
 }
 /// Split every cubic at its x/y extrema, then derive smooth flags from the actual tangents.
 fn contours(path: &PathData) -> Vec<Contour> {
+    outline_contours(path, true)
+}
+fn outline_contours(path: &PathData, split_extrema: bool) -> Vec<Contour> {
     use kurbo::PathEl;
     let mut out = vec![];
     for sp in &path.subpaths {
@@ -917,7 +991,7 @@ fn contours(path: &PathData) -> Vec<Contour> {
             ts.extend(
                 seg.extrema()
                     .into_iter()
-                    .filter(|t| *t > 1e-8 && *t < 1.0 - 1e-8),
+                    .filter(|t| split_extrema && *t > 1e-8 && *t < 1.0 - 1e-8),
             );
             ts.push(1.0);
             ts.sort_by(f64::total_cmp);
@@ -1073,14 +1147,38 @@ pub fn expand_strokes(
         }
         let mut report = stroke_counts(&g);
         let bounds = merged.to_bezpath().bounding_box();
-        report["overshoot"] = json!({"baseline":(font.metrics.baseline-bounds.y0).max(0.0),"x_height":(bounds.y1-font.metrics.x_height).max(0.0),"cap_height":(bounds.y1-font.metrics.cap_height).max(0.0)});
+        let zone = g.unicode.and_then(char::from_u32).or_else(|| {
+            let mut c = g.name.chars();
+            let first = c.next()?;
+            c.next().is_none().then_some(first)
+        });
+        let mut overshoot = serde_json::Map::new();
+        let bottom = if zone.is_some_and(|c| "gjpqy".contains(c)) {
+            ("descender", font.metrics.descender)
+        } else {
+            ("baseline", font.metrics.baseline)
+        };
+        overshoot.insert(bottom.0.into(), json!((bottom.1 - bounds.y0).max(0.)));
+        let top = if zone.is_some_and(|c| c.is_uppercase() || c.is_ascii_digit()) {
+            Some(("cap_height", font.metrics.cap_height))
+        } else if zone.is_some_and(|c| "bdfhklt".contains(c)) {
+            Some(("ascender", font.metrics.ascender))
+        } else if zone.is_some_and(char::is_lowercase) {
+            Some(("x_height", font.metrics.x_height))
+        } else {
+            None
+        };
+        if let Some((label, height)) = top {
+            overshoot.insert(label.into(), json!((bounds.y1 - height).max(0.)));
+        }
+        report["overshoot"] = json!(overshoot);
         if options.fixed_structure {
             let stroke = &g.strokes[0];
             let collapsed = |t| {
                 let w = sample_width(stroke, t);
                 w.left == 0.0 && w.right == 0.0
             };
-            report["structure_key"] = json!({"version":2,"centerline":stroke.centerline,"width_positions":stroke.widths.iter().map(|w|w.t).collect::<Vec<_>>(),"ease":stroke.ease,"cap":stroke.cap,"collapsed_caps":[collapsed(0.0),collapsed(1.0)],"curve_subdivisions":8,"extrema_slots":5});
+            report["structure_key"] = json!({"version":3,"centerline":stroke.centerline,"width_positions":stroke.widths.iter().map(|w|w.t).collect::<Vec<_>>(),"ease":stroke.ease,"cap":stroke.cap,"collapsed_caps":[collapsed(0.0),collapsed(1.0)],"curve_subdivisions":8,"extrema_slots":if constant(stroke) && stroke.ease == WidthEase::Linear {1}else{5},"compact_constant_profile":constant(stroke) && stroke.ease == WidthEase::Linear});
         }
         report["outlines"] = json!(g.contours);
         reports.push(report);
@@ -1167,6 +1265,59 @@ mod tests {
                 .breaks,
             0
         );
+    }
+    #[test]
+    fn fixed_line_is_four_points_and_reports_only_its_zone() {
+        let mut f = font(vec![line((0., 0.), (0., 500.), 80.)]);
+        f.glyphs[0].name = "o".into();
+        f.glyphs[0].unicode = Some('o' as u32);
+        let r = fixed(&mut f);
+        assert_eq!(r["points"], 4);
+        assert!(
+            f.glyphs[0].contours[0]
+                .points
+                .iter()
+                .all(|p| p.kind == PointKind::On)
+        );
+        assert!(r["glyphs"][0]["overshoot"].get("x_height").is_some());
+        assert!(r["glyphs"][0]["overshoot"].get("cap_height").is_none());
+    }
+    #[test]
+    fn angled_cap_applies_requested_angle_to_a_curved_stroke() {
+        let mut s = line((400., 400.), (400., 100.), 86.);
+        s.centerline
+            .points
+            .insert(1, point((100., 480.).into(), PointKind::Off));
+        s.centerline
+            .points
+            .insert(2, point((100., 20.).into(), PointKind::Off));
+        s.cap = StrokeCap::Angled;
+        s.cap_angle = 28.;
+        let f = font(vec![s.clone()]);
+        let raw = raw_outline(&f, &s, &[], 0.5).unwrap();
+        let arc = ArcPath::new(&PathData::from_bezpath(
+            &centerline_path(&s.centerline).unwrap(),
+        ));
+        for t in [0., 1.] {
+            let (p, v) = arc.at(t * arc.len());
+            let n = Vec2::new(-v.y, v.x);
+            let plane = v - n * 28_f64.to_radians().tan();
+            let cuts: Vec<_> = raw
+                .segments()
+                .filter(|s| {
+                    (s.start() - p).dot(plane).abs() < 1e-6 && (s.end() - p).dot(plane).abs() < 1e-6
+                })
+                .collect();
+            assert!(!cuts.is_empty(), "missing angled terminal cut");
+        }
+        let mut f = font(vec![s]);
+        expand(&mut f);
+        assert_eq!(
+            f.glyphs[0].contours.len(),
+            1,
+            "angled terminal must not create islands"
+        );
+        clean(&f);
     }
     #[test]
     fn straight_rectangle() {

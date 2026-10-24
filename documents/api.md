@@ -33,7 +33,7 @@ TTF `save` accepts `ttf_tolerance` (positive font units, default `0.5`):
 {"op":"save","path":"Wide.ttf","ttf_tolerance":0.5}
 ```
 
-Its response includes `data.ttf`: `split_segments` (source cubics emitted as multiple quadratics), `quadratic_segments`, `max_error`, `tolerance`, `tolerance_exceeded`, and `max_tangent_break_degrees`. `max_error` is a conservative upper bound on source-to-output same-parameter distance, measured **after integer rounding and smooth-handle repair**, to within 0.0001 units. `tolerance_exceeded` counts source segments whose bound exceeds the tolerance. Integer quantization alone can exceed 0.5 units; such exports succeed with explicit diagnostics and `check_outlines` reports `ttf-error`. `ttf-kink` reports exported smooth joins above 1 degree. Invalid tolerances fail before writing or backing up files. JSON/UFO saves ignore this option.
+Its response includes `data.ttf`: `split_segments` (source cubics emitted as multiple quadratics), `quadratic_segments`, `max_error`, `tolerance`, `tolerance_exceeded`, and `max_tangent_break_degrees`. `max_error` is a conservative upper bound on source-to-output same-parameter distance, measured **after integer rounding and smooth-handle repair**, to within 0.0001 units. `tolerance_exceeded` counts source segments whose bound exceeds the tolerance. Integer quantization alone can exceed 0.5 units; exports up to twice the tolerance succeed with explicit diagnostics and `check_outlines` reports `ttf-error`. Smooth-handle repair never moves a rounded handle by more than the tolerance; a residual angle is preferred to shape distortion. Any final error above **2x tolerance** refuses the export before touching or backing up the destination. `ttf-kink` reports exported smooth joins above 1 degree. Invalid tolerances fail before writing or backing up files. JSON/UFO saves ignore this option.
 
 Cubic conversion uses tangent-preserving quadratic splines, with implied on-curve midpoints between consecutive off-curve controls. Smooth source knots retain explicit on-curve points, and their adjacent integer handles are fitted to a common lattice direction. A source quadratic (or one-quadratic cubic fit) whose two endpoints are smooth is split into two quadratics so each endpoint can be repaired independently. The drawing window and CLI save output show the split count and rounded error.
 
@@ -551,11 +551,13 @@ Real designs that mix categories can be misclassified; inspect reasons and speci
 
 Each style group reports min/median/max and the families/locations setting extrema.
 Font-unit lengths are divided by each font's x-height before cross-font comparison;
-ratios are unchanged. Nearest-family distance is RMS feature differences divided by
-fixed scales: x/cap 0.15, cap/UPM 0.15, stem/x 0.08, contrast 1.0, o-width/x 0.25,
-serif extension 0.4, n/H advance ratio 0.2. At least four shared features are required;
-results exclude the target's own family and deduplicate other families, keeping five.
-The three largest standardized differences accompany each match.
+ratios are unchanged. Nearest-family distance uses the atlas's **33 dimensions**:
+identical transforms, missing-feature masks and domain-balanced RMS. Calibration
+uses one regular upright representative per reference family, with median/IQR scales
+and fixed floors. At least 12 shared dimensions across four domains are required.
+Results exclude the target's own family and keep the closest face from five other
+families. The four largest standardized differences accompany each match. Distances
+from different fitted collections are not directly comparable.
 
 Outliers use a leave-one-family-out observed class range with at least three peer
 faces; a font cannot define its own acceptable limits. A comparison target is not
@@ -817,9 +819,9 @@ Adaptive expansion reuses VectorCraft's width expander, curve-preserving boolean
 
 Fixed structure supports **one smooth centerline with constant or variable left/right widths per glyph**, open or closed, with no existing contours, nib angle, angled cap, join thinning, or sharp segment joins. Both `linear` and `smooth` profile easing, asymmetric widths, taper/swell/pinch presets, and named-stem fractions work in fixed mode.
 
-Across masters, keep the centerline geometry, **width-point `t` positions**, easing, cap, and mode identical. The left/right width values may change independently; uniform scaling is not required. Profile knots are converted from normalized arc length into centerline segment boundaries. Fixed subdivisions use exact one-sided profile derivatives, preserving intended linear-profile corners and smooth-profile tangents. Each fitted cubic reserves five pieces for its possible x/y extrema; unused slots become deterministic subdivisions. Moving or newly appearing extrema therefore remain on-curve without changing point count, point kinds, or ordering. Round caps use the same extrema-slot scheme.
+Across masters, keep the centerline geometry, **width-point `t` positions**, easing, cap, and mode identical. The left/right width values may change independently; uniform scaling is not required. Profile knots are converted from normalized arc length into centerline segment boundaries. Fixed subdivisions use exact one-sided profile derivatives, preserving intended linear-profile corners and smooth-profile tangents. Straight segments with linear width profiles stay straight. Constant profiles with linear easing use compact fixed cubic subdivisions. Variable or smooth profiles reserve five pieces per fitted cubic for possible x/y extrema; unused slots become deterministic subdivisions. Moving or newly appearing extrema therefore remain on-curve without changing point count, point kinds, or ordering. Round caps use the same extrema-slot scheme.
 
-Each fixed-mode glyph returns `structure_key`, an object describing its centerline, profile positions, easing, cap, collapsed endpoint caps, and layout version. **Compare these keys before blending expanded masters**; matching keys from successful expansions guarantee compatible contour/point layouts even when width values differ. The current layout is version **2**. Regenerate all masters together when updating from the earlier fixed-mode implementation. `compatible: true` and `fixed_structure: true` explicitly identify this guarantee. Adaptive mode does not return a structure key.
+Each fixed-mode glyph returns `structure_key`, an object describing its centerline, profile positions, easing, cap, collapsed endpoint caps, and layout version. **Compare these keys before blending expanded masters**; matching keys from successful expansions guarantee compatible contour/point layouts even when width values differ. The current layout is version **3**. The structure key also distinguishes compact constant profiles from variable/smooth layouts. Regenerate all masters together when updating from the earlier fixed-mode implementation. `compatible: true` and `fixed_structure: true` explicitly identify this guarantee. Adaptive mode does not return a structure key.
 
 ```json
 {"op":"stroke_width","name":"test","index":0,"points":[{"t":0,"left":20,"right":30},{"t":0.5,"left":70,"right":50},{"t":1,"left":25,"right":30}]}
@@ -842,3 +844,29 @@ All six commands return the standard `ok`/`error` JSON. Successful edits return 
 Commands operate in memory and never write files implicitly. Use `save` to persist; existing overwrite/backup protection still requires `force: true`. JSON is the authoring format. UFO/TTF export and blending refuse fonts with editable strokes to avoid dropping centerline data; expand with `keep_strokes: false` first. The editor's contour rendering does not display unexpanded strokes; use preview or expand to inspect ink.
 
 The MCP tools have the same names (`stroke_add`, `stroke_set`, `stroke_remove`, `stroke_width`, `stroke_expand`, `stroke_preview`), arguments, and JSON responses, and run through the same session commands as `foundry run`. The older `stroke` command / `path_stroke` MCP tool still makes outline/inline effects from existing contours.
+
+
+### Analyzer corrections (2026-10-24)
+
+Analyzer `outline-analyzer-0.2.0` adds aperture and terminal evidence to sans
+classification, with confidence derived from score margin and available evidence.
+Greyness uses ink area / (unshaped advance sum * UPM). The thickness sheet and o
+stress use boundary-normal spans; stress is null when 5th-to-95th percentile normal
+thickness modulation is below 8%. Stroke overshoot reports baseline plus the glyph's
+applicable x-height, cap, ascender or descender zone, rather than every metric zone.
+
+Atlas space `measured-font-space-v2` groups explicit family suffixes such as `v3`
+and `v4.7` beneath one family. `Family.revisions` maps revision labels to face IDs;
+each face retains its source family and revision. Round markers in source paths
+identify design iterations, with embedded font version as fallback. The explorer
+shows revision groups and revision labels on face buttons. Numeric names without
+an explicit v-number suffix remain unchanged; reviewed aliases still take priority.
+
+A class-filtered `atlas-briefs` searches within that class when its candidates were
+omitted from the global shortlist. Distance and support requirements are retained.
+Existing v1 snapshots stay browsable and queryable. Re-measure and rebuild into a
+fresh folder before using v2 evaluation; old and new measurements cannot be mixed.
+
+The provided Vostok v4.7 Regular TTF was independently inspected: its only kerning
+table has 11 horizontal legacy pairs, and it has no GPOS table. The reported count
+is correct for that file.

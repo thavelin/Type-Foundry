@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Contour, Font, Glyph, Point, PointKind};
-use kurbo::{Ellipse, PathEl, Shape};
+use kurbo::{Ellipse, ParamCurve, PathEl, Shape};
 use std::sync::atomic::{AtomicU64, Ordering};
 static SEQ: AtomicU64 = AtomicU64::new(0);
 struct Temp(PathBuf);
@@ -649,5 +649,166 @@ fn selected_binary_outline_import_preserves_reference_measurements() {
             assert_eq!(a.metrics[key].value, b.metrics[key].value);
         }
         assert_eq!(a.metadata, b.metadata);
+    }
+}
+
+#[test]
+fn greyness_is_independent_of_declared_vertical_metrics() {
+    let t = Temp::new();
+    let a = fixture("geometric sans");
+    let mut b = a.clone();
+    b.metrics.ascender = 550.;
+    b.metrics.descender = -50.;
+    let paths = [t.font("a.json", &a), t.font("b.json", &b)];
+    let r = analyze_fonts(&paths, &Options::default()).unwrap();
+    assert_eq!(r.fonts.len(), 2);
+    assert_eq!(
+        r.fonts[0].metrics["spacing.texture_greyness"].value,
+        r.fonts[1].metrics["spacing.texture_greyness"].value
+    );
+    assert!(
+        r.fonts[0].metrics["spacing.texture_greyness"]
+            .value
+            .is_some()
+    );
+}
+#[test]
+fn normal_thickness_is_constant_around_a_monoline_circle() {
+    let f = fixture("geometric sans");
+    let o = vector::Outline::new(f.glyph("o").unwrap());
+    for seg in o.paths[0]
+        .segments()
+        .filter(|s| s.start().distance(s.end()) > 1e-8)
+    {
+        for t in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            let (a, b) = o.normal_span(seg, t).unwrap();
+            assert!(
+                (a.distance(b) - 50.).abs() < 0.05,
+                "normal thickness {}",
+                a.distance(b)
+            );
+        }
+    }
+    let d = Temp::new();
+    let p = d.font("mono.json", &f);
+    let r = analyze_fonts(&[p], &Options::default()).unwrap();
+    assert!(r.fonts[0].metrics["stems.stress_angle"].value.is_none());
+}
+#[test]
+fn nearest_uses_arch_evidence_outside_the_old_seven_features() {
+    let t = Temp::new();
+    let paths = [
+        t.font("a.json", &fixture("geometric sans")),
+        t.font("b.json", &fixture("humanist sans")),
+    ];
+    let mut r = analyze_fonts(&paths, &Options::default()).unwrap();
+    let a = r.fonts.remove(0);
+    let mut b = a.clone();
+    b.metadata["family"] = json!("B");
+    b.source.sha256 = "b".into();
+    let mut c = b.clone();
+    c.metadata["family"] = json!("C");
+    c.source.sha256 = "c".into();
+    // These fonts agree on all seven original features; their arch profiles distinguish them.
+    for key in [
+        "arch.n.thickness_10",
+        "arch.n.thickness_20",
+        "arch.n.thickness_50",
+        "arch.n.thickness_90",
+    ] {
+        if let Some(m) = c.metrics.get_mut(key) {
+            m.value = m.value.map(|v| v * 2.);
+            m.x_height_ratio = m.x_height_ratio.map(|v| v * 2.);
+        }
+    }
+    let near = collection::nearest(&a, &[c, b]);
+    assert_eq!(near[0]["family"], "B");
+    assert_eq!(near[0]["dimensions"], 33);
+    assert!(near[1]["distance"].as_f64().unwrap() > 0.);
+}
+
+#[test]
+fn aperture_and_terminal_evidence_separates_geometric_and_humanist_sans() {
+    let t = Temp::new();
+    let font = fixture("geometric sans");
+    let path = t.font("base.json", &font);
+    let r = analyze_fonts(&[path], &Options::default()).unwrap();
+    let study = &r.fonts[0];
+    // Measured feature combinations, without supplying a reference font's name.
+    for (round, contrast, c, e, cut, stress, expected) in [
+        (
+            1.0602,
+            1.1709,
+            0.6124,
+            0.1281,
+            Some(90.),
+            Some(3.97),
+            "geometric sans",
+        ),
+        (
+            1.0348,
+            1.1033,
+            0.5826,
+            0.1374,
+            Some(90.),
+            None,
+            "geometric sans",
+        ),
+        (
+            0.9844,
+            1.2271,
+            0.6995,
+            0.2671,
+            Some(90.),
+            Some(6.38),
+            "humanist sans",
+        ),
+        (
+            0.9230,
+            1.2006,
+            0.6206,
+            0.2870,
+            Some(90.),
+            Some(4.38),
+            "humanist sans",
+        ),
+        (
+            0.9464,
+            1.2565,
+            0.5893,
+            0.2825,
+            None,
+            Some(5.33),
+            "humanist sans",
+        ),
+        (
+            1.0060,
+            1.0469,
+            0.3853,
+            0.1699,
+            Some(-27.76),
+            None,
+            "geometric sans",
+        ),
+    ] {
+        let mut metrics = study.metrics.clone();
+        for (key, value) in [
+            ("widths.o_x", Some(round)),
+            ("stems.contrast", Some(contrast)),
+            ("aperture.c.opening_ratio", Some(c)),
+            ("aperture.e.opening_ratio", Some(e)),
+            ("terminals.c.end_cut_angle", cut),
+            ("stems.stress_angle", stress),
+        ] {
+            metrics.get_mut(key).unwrap().value = value;
+        }
+        let class = advanced::refine_classification(
+            study.classification.clone(),
+            &font,
+            &metrics,
+            &json!({}),
+        );
+        assert_eq!(class.class, expected, "{:?}", class);
+        assert_ne!(class.confidence, 0.66);
     }
 }

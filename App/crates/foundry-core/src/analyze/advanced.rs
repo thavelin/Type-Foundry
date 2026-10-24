@@ -242,6 +242,83 @@ pub(super) fn refine_classification(
     metadata: &Value,
 ) -> Classification {
     class.serif_type = serif_type(font, m);
+    if matches!(
+        class.class.as_str(),
+        "geometric sans" | "humanist sans" | "grotesque"
+    ) {
+        let value = |key: &str| m.get(key).and_then(|m| m.value);
+        let round = value("widths.o_x");
+        let contrast = value("stems.contrast");
+        let aperture =
+            value("aperture.c.opening_ratio").or_else(|| value("aperture.C.opening_ratio"));
+        let terminal =
+            value("terminals.c.end_cut_angle").or_else(|| value("terminals.C.end_cut_angle"));
+        let stress = value("stems.stress_angle");
+        let c_open = aperture.map(|v| ((v - 0.35) / 0.3).clamp(0., 1.));
+        let e_open = value("aperture.e.opening_ratio").map(|v| ((v - 0.17) / 0.11).clamp(0., 1.));
+        let open = match (c_open, e_open) {
+            (Some(c), Some(e)) => (c + e) * 0.5,
+            (Some(c), None) => c,
+            (None, Some(e)) => e,
+            _ => 0.5,
+        };
+        let modulation = contrast
+            .map(|v| ((v - 1.) / 0.5).clamp(0., 1.))
+            .unwrap_or(0.5);
+        let roundness = round
+            .map(|v| (1. - (v - 1.).abs() / 0.2).clamp(0., 1.))
+            .unwrap_or(0.5);
+        let vertical = terminal
+            .map(|v| ((v.abs() - 45.) / 45.).clamp(0., 1.))
+            .unwrap_or(0.);
+        let oblique = terminal
+            .map(|v| (1. - (v.abs() - 35.).abs() / 35.).clamp(0., 1.))
+            .unwrap_or(0.5);
+        let horizontal = terminal
+            .map(|v| (1. - v.abs() / 45.).clamp(0., 1.))
+            .unwrap_or(0.);
+        let mut scores = [
+            (
+                "geometric sans",
+                0.30 * roundness + 0.30 * (1. - modulation) + 0.30 * (1. - open) + 0.10 * oblique,
+            ),
+            (
+                "humanist sans",
+                0.50 * open
+                    + 0.15 * vertical
+                    + 0.35 * modulation
+                    + 0.15 * stress.map(|v| (v.abs() / 20.).min(1.)).unwrap_or(0.),
+            ),
+            ("grotesque", 0.45 + 0.15 * (1. - open) + 0.20 * horizontal),
+        ];
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let margin = scores[0].1 - scores[1].1;
+        let evidence = [round, contrast, aperture, terminal]
+            .iter()
+            .filter(|v| v.is_some())
+            .count() as f64
+            / 4.;
+        class.class = scores[0].0.into();
+        class.confidence = (0.35 + 0.55 * margin / (scores[0].1 + 0.1) + 0.10 * evidence).min(0.9)
+            * evidence.sqrt();
+        class.reasons = vec![
+            format!(
+                "outline evidence scores: {} {:.3}, {} {:.3}, {} {:.3}; margin {:.3}",
+                scores[0].0,
+                scores[0].1,
+                scores[1].0,
+                scores[1].1,
+                scores[2].0,
+                scores[2].1,
+                margin
+            ),
+            format!(
+                "o roundness {round:?}, contrast {contrast:?}, c aperture {aperture:?}, terminal angle {terminal:?}"
+            ),
+            "confidence follows the winning margin and evidence coverage; uncalibrated heuristic"
+                .into(),
+        ];
+    }
     // Connected writing evidence: cursive OpenType attachment plus a slanted design.
     if class.class != "mono"
         && font.style.italic
@@ -258,7 +335,7 @@ pub(super) fn refine_classification(
             "script inferred from combined metadata and outline analysis; verify specimen".into(),
         ];
     }
-    class.method="outline-rules-v1; uncalibrated confidence; serif type from foot thickness, bracket curves and wedge slopes".into();
+    class.method="outline-rules-v2; sans score margin and evidence coverage; serif type from foot thickness, bracket curves and wedge slopes".into();
     class
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 // key, label, domain, minimum robust scale, transform. Domain weighting prevents correlated widths from dominating.
-pub(super) const SPECS: &[(&str, &str, &str, f64, &str)] = &[
+pub(crate) const SPECS: &[(&str, &str, &str, f64, &str)] = &[
     (
         "proportions.x_cap",
         "X-height / cap height",
@@ -233,7 +233,7 @@ pub(super) const SPECS: &[(&str, &str, &str, f64, &str)] = &[
         "ratio",
     ),
 ];
-pub(super) fn extract(s: &Study) -> Vec<Option<f64>> {
+pub(crate) fn extract(s: &Study) -> Vec<Option<f64>> {
     SPECS
         .iter()
         .map(|(key, _, _, _, transform)| {
@@ -258,7 +258,7 @@ pub(super) fn extract(s: &Study) -> Vec<Option<f64>> {
         })
         .collect()
 }
-pub(super) fn quantile(values: &[f64], p: f64) -> f64 {
+pub(crate) fn quantile(values: &[f64], p: f64) -> f64 {
     if values.is_empty() {
         return 0.;
     }
@@ -267,13 +267,22 @@ pub(super) fn quantile(values: &[f64], p: f64) -> f64 {
     let hi = at.ceil() as usize;
     values[lo] + (values[hi] - values[lo]) * (at - lo as f64)
 }
-pub(super) fn fit(families: &[Family]) -> Vec<Dimension> {
-    SPECS.iter().enumerate().map(|(i,(key,label,group,floor,transform))|{
- let mut values:Vec<_>=families.iter().filter_map(|f|f.raw[i]).collect();values.sort_by(f64::total_cmp);let center=quantile(&values,0.5);let scale=((quantile(&values,0.75)-quantile(&values,0.25))/1.349).max(*floor);
- Dimension{key:if matches!(*transform,"sin"|"cos"){format!("{key}.{transform}")}else{(*key).into()},label:(*label).into(),group:(*group).into(),method:format!("{transform}; family-balanced median/IQR scale with floor {floor}; winsorized z to +/-5; missing mask"),center,scale,measured_families:values.len()}
-}).collect()
+pub(crate) fn fit(families: &[Family]) -> Vec<Dimension> {
+    fit_rows(&families.iter().map(|f| f.raw.clone()).collect::<Vec<_>>())
 }
-pub(super) fn encode(raw: &[Option<f64>], dims: &[Dimension]) -> (Vec<f64>, Vec<bool>) {
+pub(crate) fn fit_rows(rows: &[Vec<Option<f64>>]) -> Vec<Dimension> {
+    SPECS.iter().enumerate().map(|(i,(key,label,group,floor,transform))|{
+        let mut values: Vec<_> = rows.iter().filter_map(|r|r[i]).collect();
+        values.sort_by(f64::total_cmp);
+        let center=quantile(&values,0.5);
+        let scale=((quantile(&values,0.75)-quantile(&values,0.25))/1.349).max(*floor);
+        Dimension {key:if matches!(*transform,"sin"|"cos"){format!("{key}.{transform}")}else{(*key).into()},
+            label:(*label).into(),group:(*group).into(),
+            method:format!("{transform}; family-balanced median/IQR scale with floor {floor}; winsorized z to +/-5; missing mask"),
+            center,scale,measured_families:values.len()}
+    }).collect()
+}
+pub(crate) fn encode(raw: &[Option<f64>], dims: &[Dimension]) -> (Vec<f64>, Vec<bool>) {
     (
         raw.iter()
             .zip(dims)
@@ -285,7 +294,7 @@ pub(super) fn encode(raw: &[Option<f64>], dims: &[Dimension]) -> (Vec<f64>, Vec<
         raw.iter().map(Option::is_some).collect(),
     )
 }
-pub(super) fn distance(
+pub(crate) fn distance(
     a: &[f64],
     am: &[bool],
     b: &[f64],
@@ -329,7 +338,7 @@ pub(super) fn distance(
         / groups as f64;
     Some((mean.sqrt(), shared))
 }
-pub(super) fn nearest(
+pub(crate) fn nearest(
     f: &Family,
     all: &[Family],
     dims: &[Dimension],
@@ -349,7 +358,7 @@ pub(super) fn nearest(
  json!({"id":g.id,"family":g.name,"class":g.class,"distance":distance,"shared_dimensions":shared,"coverage":shared as f64/dims.len()as f64,"differences":diffs.iter().take(4).map(|(i,_,d)|json!({"metric":d.key,"label":d.label,"target":f.raw[*i],"other":g.raw[*i],"standardized_difference":f.vector[*i]-g.vector[*i]})).collect::<Vec<_>>()})
  }).collect()
 }
-pub(super) fn project(families: &mut [Family], dims: &[Dimension]) -> Value {
+pub(crate) fn project(families: &mut [Family], dims: &[Dimension]) -> Value {
     let n = dims.len();
     let mut cov = vec![vec![0.; n]; n];
     let denom = (families.len().saturating_sub(1)).max(1) as f64;
@@ -419,7 +428,7 @@ pub(super) fn project(families: &mut [Family], dims: &[Dimension]) -> Value {
     let total = (0..n).map(|i| cov[i][i]).sum::<f64>();
     json!({"method":"deterministic centered PCA; median-imputed masked coordinates for visualization only; 120 power iterations; stable sign","components":axes,"center":means,"explained_variance":eigenvalues.iter().map(|v|if total>0.{v/total}else{0.}).collect::<Vec<_>>(),"loadings":axes.iter().map(|axis|{let mut sorted:Vec<_>=axis.iter().enumerate().collect();sorted.sort_by(|a,b|b.1.abs().total_cmp(&a.1.abs()));sorted.into_iter().take(6).map(|(i,v)|json!({"metric":dims[i].key,"loading":v})).collect::<Vec<_>>()}).collect::<Vec<_>>(),"caution":"PCA proximity and blank plot regions are not full-space distances or novelty proof"})
 }
-pub(super) fn cluster(
+pub(crate) fn cluster(
     families: &mut [Family],
     dims: &[Dimension],
     min_shared: usize,

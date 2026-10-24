@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub const VERSION: u32 = 2;
 // Version 1 is reserved for the other study implementation under development.
-pub const ALGORITHM: &str = "outline-analyzer-0.1.0";
+pub const ALGORITHM: &str = "outline-analyzer-0.2.0";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

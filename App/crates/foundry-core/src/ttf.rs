@@ -160,6 +160,13 @@ fn write_planned(
         ..TtfReport::default()
     };
     let glyphs = build_glyphs(font, plan, &mut report)?;
+    if !report.max_error.is_finite() || report.max_error > options.tolerance * 2.0 {
+        return Err(FoundryError::Ttf(format!(
+            "rounded TTF error {:.6} exceeds hard limit {:.6} (2x tolerance); no font written",
+            report.max_error,
+            options.tolerance * 2.0
+        )));
+    }
     let bounds = font_bounds(&glyphs);
     let encoded: Vec<EncodedGlyph> = glyphs.iter().map(encode_glyph).collect();
     let mut glyf = Vec::new();
@@ -273,6 +280,7 @@ struct BuiltGlyph {
     name: String,
 }
 
+#[derive(Clone, Copy)]
 struct DrawPoint {
     x: i16,
     y: i16,
@@ -445,7 +453,7 @@ fn draw_contour(
         if contour.points[source].smooth
             && (contour.closed || (index > 0 && index + 1 < drawn.len()))
         {
-            repair_smooth(&mut drawn, index);
+            repair_smooth(&mut drawn, index, report.tolerance);
             let prev = (index + drawn.len() - 1) % drawn.len();
             let next = (index + 1) % drawn.len();
             let a = draw_position(&drawn[index]) - draw_position(&drawn[prev]);
@@ -528,7 +536,20 @@ fn draw_position(p: &DrawPoint) -> kurbo::Point {
 // Integer controls on the same primitive lattice direction remain exactly collinear.
 // Minimize displacement from the already fitted controls. Quantization can make the
 // requested tolerance impossible; the report exposes that rather than hiding it.
-fn repair_smooth(points: &mut [DrawPoint], index: usize) {
+fn repair_smooth(points: &mut [DrawPoint], index: usize, tolerance: f64) {
+    let prev = (index + points.len() - 1) % points.len();
+    let next = (index + 1) % points.len();
+    let original = [points[prev], points[next]];
+    repair_smooth_candidate(points, index);
+    // Exact integer collinearity is optional. Preserving the fitted shape is not.
+    for (i, before) in [prev, next].into_iter().zip(original) {
+        if draw_position(&points[i]).distance(draw_position(&before)) > tolerance {
+            points[i] = before;
+        }
+    }
+}
+
+fn repair_smooth_candidate(points: &mut [DrawPoint], index: usize) {
     let len = points.len();
     let prev = (index + len - 1) % len;
     let next = (index + 1) % len;
@@ -1936,9 +1957,16 @@ mod tests {
             p.x += 0.49;
             p.y += 0.49;
         }
-        let (_, report) = write_ttf_options(&font, TtfOptions { tolerance: 0.01 }).unwrap();
-        assert!(report.max_error > 0.01);
-        assert!(report.tolerance_exceeded > 0);
+        assert!(write_ttf_options(&font, TtfOptions { tolerance: 0.01 }).is_err());
+        let path =
+            std::env::temp_dir().join(format!("foundry-ttf-refusal-{}.ttf", std::process::id()));
+        fs::write(&path, b"existing destination").unwrap();
+        assert!(
+            font.save_ttf_with_options(&path, true, TtfOptions { tolerance: 0.01 })
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"existing destination");
+        fs::remove_file(path).unwrap();
         for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(write_ttf_options(&font, TtfOptions { tolerance }).is_err());
         }
@@ -1969,11 +1997,39 @@ mod tests {
                 on: false,
             },
         ];
-        repair_smooth(&mut points, 1);
+        repair_smooth(&mut points, 1, 2.0);
         let a = draw_position(&points[1]) - draw_position(&points[0]);
         let b = draw_position(&points[2]) - draw_position(&points[1]);
         assert_eq!(a.cross(b), 0.0);
         assert!(a.dot(b) > 0.0);
+    }
+
+    #[test]
+    fn smooth_line_curve_join_never_moves_a_handle_beyond_tolerance() {
+        // A relatively prime line direction used to snap the handle hundreds of units away.
+        for tolerance in [0.5, 1.0, 2.0] {
+            let mut points = vec![
+                DrawPoint {
+                    x: -177,
+                    y: -529,
+                    on: true,
+                },
+                DrawPoint {
+                    x: 0,
+                    y: 0,
+                    on: true,
+                },
+                DrawPoint {
+                    x: 31,
+                    y: 92,
+                    on: false,
+                },
+            ];
+            let before = draw_position(&points[2]);
+            repair_smooth(&mut points, 1, tolerance);
+            assert!(draw_position(&points[2]).distance(before) <= tolerance);
+            assert_eq!(points[0].x, -177);
+        }
     }
 
     #[test]

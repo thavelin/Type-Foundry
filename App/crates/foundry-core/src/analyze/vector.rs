@@ -92,6 +92,46 @@ impl Outline {
         }
         out
     }
+    /// Filled span adjacent to a boundary point along its local normal.
+    /// Tangential rays and counter gaps are excluded using nonzero winding.
+    pub fn normal_span(&self, seg: PathSeg, t: f64) -> Option<(Point, Point)> {
+        use kurbo::ParamCurveDeriv;
+        let q = seg.eval(t);
+        let d = match seg {
+            PathSeg::Line(s) => s.deriv().eval(t).to_vec2(),
+            PathSeg::Quad(s) => s.deriv().eval(t).to_vec2(),
+            PathSeg::Cubic(s) => s.deriv().eval(t).to_vec2(),
+        };
+        if d.hypot() < 1e-9 {
+            return None;
+        }
+        let normal = kurbo::Vec2::new(-d.y, d.x) / d.hypot();
+        let b = self.bounds?;
+        let radius = b.width().hypot(b.height()) + 1.;
+        let ray = Line::new(q - normal * radius, q + normal * radius);
+        let mut hits: Vec<_> = self
+            .paths
+            .iter()
+            .flat_map(|p| p.segments())
+            .flat_map(|s| {
+                s.intersect_line(ray)
+                    .into_iter()
+                    .map(move |h| (s.eval(h.segment_t) - q).dot(normal))
+            })
+            .collect();
+        hits.sort_by(f64::total_cmp);
+        hits.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        hits.windows(2)
+            .filter(|w| w[0].abs().min(w[1].abs()) < 1e-5 && w[1] - w[0] > 1e-5)
+            .find(|w| {
+                self.paths
+                    .iter()
+                    .map(|p| p.winding(q + normal * ((w[0] + w[1]) * 0.5)))
+                    .sum::<i32>()
+                    != 0
+            })
+            .map(|w| (q + normal * w[0], q + normal * w[1]))
+    }
     pub fn stroke(&self, at: f64, vertical: bool) -> Option<f64> {
         self.intervals(at, vertical)
             .into_iter()

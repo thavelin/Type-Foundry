@@ -1,5 +1,5 @@
 //! Interpretable font/family design space. Measurements in; no source outlines or learned font data out.
-mod embedding;
+pub(crate) mod embedding;
 mod gaps;
 #[cfg(test)]
 mod tests;
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub const FORMAT: &str = "typefoundry.atlas";
 pub const VERSION: u32 = 1;
-pub const EMBEDDING: &str = "measured-font-space-v1";
+pub const EMBEDDING: &str = "measured-font-space-v2";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Options {
@@ -52,6 +52,8 @@ pub struct Face {
     pub id: String,
     pub family_id: String,
     pub family: String,
+    #[serde(default)]
+    pub revision: String,
     pub style: String,
     pub weight: u16,
     pub width: u16,
@@ -71,6 +73,8 @@ pub struct Family {
     pub id: String,
     pub name: String,
     pub aliases: Vec<String>,
+    #[serde(default)]
+    pub revisions: BTreeMap<String, Vec<String>>,
     pub faces: Vec<String>,
     pub representative: String,
     pub class: String,
@@ -104,6 +108,59 @@ pub struct Atlas {
     pub inventory: Value,
     pub warnings: Vec<String>,
     pub source_errors: Vec<Value>,
+}
+fn family_revision(name: &str) -> (&str, Option<&str>) {
+    if let Some((base, suffix)) = name.rsplit_once(' ') {
+        let version = suffix
+            .strip_prefix('v')
+            .or_else(|| suffix.strip_prefix('V'));
+        if version.is_some_and(|v| {
+            !v.is_empty()
+                && v.starts_with(|c: char| c.is_ascii_digit())
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        }) {
+            return (base, Some(suffix));
+        }
+    }
+    (name, None)
+}
+fn revision(s: &Study, named: Option<&str>) -> String {
+    if let Some(v) = named {
+        return v.into();
+    }
+    for part in s.source.path.split(['/', '\\']).rev() {
+        let lower = part.to_ascii_lowercase();
+        if lower
+            .strip_prefix("round")
+            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            return part.into();
+        }
+        for token in part.split(['-', '_']) {
+            if token
+                .strip_prefix('r')
+                .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+            {
+                return token
+                    .strip_suffix(".ttf")
+                    .or_else(|| token.strip_suffix(".otf"))
+                    .or_else(|| token.strip_suffix(".json"))
+                    .unwrap_or(token)
+                    .into();
+            }
+        }
+    }
+    s.metadata["font_version"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unspecified")
+        .into()
+}
+fn revision_order(v: &str) -> Vec<u32> {
+    v.split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse().ok())
+        .collect()
 }
 fn hash(s: &[u8]) -> String {
     format!("{:x}", Sha256::digest(s))
@@ -273,7 +330,11 @@ pub fn build(paths: &[String], options: &Options) -> Result<Atlas, String> {
         } else {
             family
         };
-        let alias = family_aliases.get(family);
+        let (base_family, named_revision) = family_revision(family);
+        let revision = revision(&s, named_revision);
+        let alias = family_aliases
+            .get(family)
+            .or_else(|| family_aliases.get(base_family));
         let canonical = if let Some(alias) = alias {
             let target = alias["family"]
                 .as_str()
@@ -289,8 +350,16 @@ pub fn build(paths: &[String], options: &Options) -> Result<Atlas, String> {
                 .push(format!("{family}: {reason}"));
             target
         } else {
-            family
+            base_family
         };
+        if named_revision.is_some() {
+            grouping_notes
+                .entry(normalized(canonical))
+                .or_default()
+                .push(format!(
+                    "{family}: explicit version suffix retained in revision {revision}"
+                ));
+        }
         let family_id = hash(normalized(canonical).as_bytes());
         family_names
             .entry(family_id.clone())
@@ -304,6 +373,7 @@ pub fn build(paths: &[String], options: &Options) -> Result<Atlas, String> {
             id,
             family_id,
             family: family.into(),
+            revision,
             style: text(&s.metadata, "style").into(),
             weight: s.metadata["weight_class"].as_u64().unwrap_or(400) as u16,
             width: s.metadata["width_class"].as_u64().unwrap_or(5) as u16,
@@ -355,7 +425,10 @@ pub fn build(paths: &[String], options: &Options) -> Result<Atlas, String> {
                     }
                     + (1. - f.coverage) * 2.
             };
-            score(a).total_cmp(&score(b)).then(a.id.cmp(&b.id))
+            score(a)
+                .total_cmp(&score(b))
+                .then_with(|| revision_order(&b.revision).cmp(&revision_order(&a.revision)))
+                .then(a.id.cmp(&b.id))
         });
         let rep = members[0];
         let mut distribution = BTreeMap::new();
@@ -377,6 +450,16 @@ pub fn build(paths: &[String], options: &Options) -> Result<Atlas, String> {
             id: id.clone(),
             name,
             aliases: names.into_iter().collect(),
+            revisions: {
+                let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for f in &members {
+                    groups
+                        .entry(f.revision.clone())
+                        .or_default()
+                        .push(f.id.clone());
+                }
+                groups
+            },
             faces: members.iter().map(|m| m.id.clone()).collect(),
             representative: rep.id.clone(),
             class: rep.class.clone(),
@@ -475,7 +558,7 @@ pub fn build(paths: &[String], options: &Options) -> Result<Atlas, String> {
     errors.dedup();
     let counts:Vec<_>=inventories.iter().map(|v|json!({"profile":v["profile"],"sources":v["sources"].as_array().map(Vec::len),"inventory_errors":v["inventory_errors"]})).collect();
     let space_id = hash(&serde_json::to_vec(&dimensions).map_err(|e| e.to_string())?);
-    let atlas=Atlas{format:FORMAT.into(),version:VERSION,embedding:EMBEDDING.into(),space_id,dimensions,faces,families,clusters,gaps,principles,projection,inventory:json!({"workers":counts,"source_paths":inventories.iter().filter_map(|v|v["sources"].as_array()).map(Vec::len).sum::<usize>(),"deduplication":"byte hash + collection face + axis coordinates; source aliases retained; family space fits one regular upright representative per normalized exact family name","coverage_scope":"configured installed/local libraries and accessible NAS indexed sources; exclusions/failures retained in source_errors"}),warnings:vec!["Distances describe selected outline measurements, not visual identity or typeface originality. Missing features have masks; they are not measured zero.".into(),"PCA is a lossy browsing projection. Gap ranking uses shared measured dimensions in the full standardized space, not empty pixels in the plot.".into(),"Classification is heuristic unless manually reviewed. Family naming collisions and source-license restrictions require review before authoring from references.".into(),"A sparse region is a hypothesis within the scanned collection; feasibility and usefulness need original drawing and testing. No outlines are reconstructed or exported.".into()],source_errors:errors};
+    let atlas=Atlas{format:FORMAT.into(),version:VERSION,embedding:EMBEDDING.into(),space_id,dimensions,faces,families,clusters,gaps,principles,projection,inventory:json!({"workers":counts,"source_paths":inventories.iter().filter_map(|v|v["sources"].as_array()).map(Vec::len).sum::<usize>(),"deduplication":"byte hash + collection face + axis coordinates; source aliases retained; family space fits one regular upright representative per normalized family; explicit v-number suffixes grouped as revisions, source round markers and font versions retained","coverage_scope":"configured installed/local libraries and accessible NAS indexed sources; exclusions/failures retained in source_errors"}),warnings:vec!["Distances describe selected outline measurements, not visual identity or typeface originality. Missing features have masks; they are not measured zero.".into(),"PCA is a lossy browsing projection. Gap ranking uses shared measured dimensions in the full standardized space, not empty pixels in the plot.".into(),"Classification is heuristic unless manually reviewed. Family naming collisions and source-license restrictions require review before authoring from references.".into(),"A sparse region is a hypothesis within the scanned collection; feasibility and usefulness need original drawing and testing. No outlines are reconstructed or exported.".into()],source_errors:errors};
     if let Some(out) = &options.output {
         write(&atlas, out)?;
     }
@@ -557,7 +640,13 @@ fn load_atlas(path: &Path) -> Result<Atlas, String> {
         }
     }
     let mut atlas: Atlas = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if atlas.format != FORMAT || atlas.version != VERSION || atlas.embedding != EMBEDDING {
+    if atlas.format != FORMAT
+        || atlas.version != VERSION
+        || !matches!(
+            atlas.embedding.as_str(),
+            EMBEDDING | "measured-font-space-v1"
+        )
+    {
         return Err("unsupported atlas version".into());
     }
     let n = atlas.dimensions.len();
@@ -609,10 +698,45 @@ pub fn query(path: &Path, family: &str, limit: usize, min_shared: usize) -> Resu
     )
 }
 
+fn class_briefs(atlas: &Atlas, class: &str, limit: usize) -> Vec<Value> {
+    let stored: Vec<_> = atlas
+        .gaps
+        .iter()
+        .filter(|g| g["class"] == class)
+        .cloned()
+        .collect();
+    if !stored.is_empty() {
+        return stored;
+    }
+    // The atlas's global top-N can exclude a populated class entirely. Recompute
+    // within that class, keeping full-space distance checks against every face.
+    let families: Vec<_> = atlas
+        .families
+        .iter()
+        .filter(|f| f.class == class)
+        .cloned()
+        .collect();
+    gaps::find(
+        &families,
+        &atlas.dimensions,
+        &Options {
+            gap_count: limit.max(24),
+            ..Options::default()
+        },
+        &atlas.faces,
+    )
+}
 pub fn briefs(path: &Path, class: Option<&str>, limit: usize) -> Result<Value, String> {
     let atlas = load_atlas(path)?;
+    let candidates = if let Some(class) = class {
+        class_briefs(&atlas, class, limit)
+    } else {
+        atlas.gaps.clone()
+    };
     Ok(
-        json!({"format":"typefoundry.design-briefs","version":1,"embedding":atlas.embedding,"space_id":atlas.space_id,"briefs":atlas.gaps.iter().filter(|g|class.is_none_or(|c|g["class"]==c)).take(limit.min(200)).collect::<Vec<_>>()}),
+        json!({"format":"typefoundry.design-briefs","version":1,"embedding":atlas.embedding,"space_id":atlas.space_id,
+        "briefs":candidates.into_iter().take(limit.min(200)).collect::<Vec<_>>(),
+        "method":"stored ranked gaps, or class-specific gap search when the global shortlist omitted the requested class; all distance/support constraints retained"}),
     )
 }
 pub fn evaluate_font(
@@ -621,7 +745,22 @@ pub fn evaluate_font(
     brief: &str,
     options: &crate::analyze::Options,
 ) -> Result<Value, String> {
-    let atlas = load_atlas(path)?;
+    let mut atlas = load_atlas(path)?;
+    if atlas.embedding != EMBEDDING {
+        return Err("remeasure and rebuild this atlas before evaluating fonts with the new analyzer; v1 snapshots remain browsable".into());
+    }
+    if !atlas.gaps.iter().any(|g| {
+        g["id"]
+            .as_str()
+            .is_some_and(|id| id == brief || (brief.len() >= 8 && id.starts_with(brief)))
+    }) {
+        let classes: BTreeSet<_> = atlas.families.iter().map(|f| f.class.clone()).collect();
+        let extra: Vec<_> = classes
+            .iter()
+            .flat_map(|c| class_briefs(&atlas, c, 200))
+            .collect();
+        atlas.gaps.extend(extra);
+    }
     let candidates: Vec<_> = atlas
         .gaps
         .iter()
