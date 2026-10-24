@@ -56,6 +56,57 @@ fn run(cli: args::Cli) -> Result<ExitCode, String> {
             println!("Wrote {}", out.display());
             Ok(ExitCode::SUCCESS)
         }
+        args::Cli::AtlasEvaluate { font, path, brief } => {
+            let data = ensure_ok(Session::new().execute(Command::AtlasEvaluate {
+                font,
+                path,
+                brief,
+                options: foundry_core::analyze::Options {
+                    profile: foundry_core::analyze::MeasurementProfile::Atlas,
+                    ..Default::default()
+                },
+            }))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        args::Cli::Atlas { paths, options } => {
+            let data = ensure_ok(Session::new().execute(Command::AtlasBuild { paths, options }))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        args::Cli::AtlasQuery {
+            path,
+            family,
+            limit,
+            min_shared,
+        } => {
+            let data = ensure_ok(Session::new().execute(Command::AtlasQuery {
+                path,
+                family,
+                limit,
+                min_shared,
+            }))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        args::Cli::AtlasBriefs { path, class, limit } => {
+            let data =
+                ensure_ok(Session::new().execute(Command::AtlasBriefs { path, class, limit }))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         args::Cli::Analyze { paths, options } => {
             let mut session = Session::new();
             let data = ensure_ok(session.execute(Command::Analyze {

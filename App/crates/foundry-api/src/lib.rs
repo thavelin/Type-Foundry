@@ -21,6 +21,33 @@ pub use foundry_core::GlyphGroup;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
+    AtlasEvaluate {
+        font: String,
+        path: String,
+        brief: String,
+        #[serde(default)]
+        options: foundry_core::analyze::Options,
+    },
+    AtlasBuild {
+        paths: Vec<String>,
+        #[serde(default)]
+        options: foundry_core::atlas::Options,
+    },
+    AtlasQuery {
+        path: String,
+        family: String,
+        #[serde(default = "atlas_limit")]
+        limit: usize,
+        #[serde(default = "atlas_min_shared")]
+        min_shared: usize,
+    },
+    AtlasBriefs {
+        path: String,
+        #[serde(default)]
+        class: Option<String>,
+        #[serde(default = "atlas_limit")]
+        limit: usize,
+    },
     Analyze {
         paths: Vec<String>,
         #[serde(default)]
@@ -1158,6 +1185,35 @@ impl Session {
                 }
                 Ok(Some(json!({ "path": path })))
             }
+            Command::AtlasEvaluate {
+                font,
+                path,
+                brief,
+                options,
+            } => Ok(Some(
+                foundry_core::atlas::evaluate_font(&font, Path::new(&path), &brief, &options)
+                    .map_err(FoundryError::Import)?,
+            )),
+            Command::AtlasBuild { paths, options } => {
+                let atlas =
+                    foundry_core::atlas::build(&paths, &options).map_err(FoundryError::Import)?;
+                Ok(Some(
+                    json!({"format":atlas.format,"version":atlas.version,"embedding":atlas.embedding,"space_id":atlas.space_id,"families":atlas.families.len(),"faces":atlas.faces.len(),"clusters":atlas.clusters.len(),"gaps":atlas.gaps.len(),"issues":atlas.source_errors.len(),"output":options.output}),
+                ))
+            }
+            Command::AtlasQuery {
+                path,
+                family,
+                limit,
+                min_shared,
+            } => Ok(Some(
+                foundry_core::atlas::query(Path::new(&path), &family, limit, min_shared)
+                    .map_err(FoundryError::Import)?,
+            )),
+            Command::AtlasBriefs { path, class, limit } => Ok(Some(
+                foundry_core::atlas::briefs(Path::new(&path), class.as_deref(), limit)
+                    .map_err(FoundryError::Import)?,
+            )),
             Command::Analyze { paths, options } => {
                 let report = foundry_core::analyze::analyze_fonts(&paths, &options)
                     .map_err(FoundryError::Import)?;
@@ -3056,5 +3112,40 @@ mod analyzer_integration_tests {
                 .unwrap()
                 .ok
         );
+    }
+}
+
+fn atlas_limit() -> usize {
+    5
+}
+fn atlas_min_shared() -> usize {
+    12
+}
+#[cfg(test)]
+mod atlas_command_tests {
+    use super::*;
+    #[test]
+    fn atlas_commands_dispatch_without_changing_the_active_font() {
+        let mut session = Session::new();
+        assert!(
+            session
+                .execute(Command::Create {
+                    name: "Current".into(),
+                    upm: 1000
+                })
+                .ok
+        );
+        let before = session.execute(Command::Info).data;
+        for command in [
+            r#"{"op":"atlas_build","paths":[],"options":{}}"#,
+            r#"{"op":"atlas_query","path":"missing.json","family":"Vostok"}"#,
+            r#"{"op":"atlas_briefs","path":"missing.json"}"#,
+            r#"{"op":"atlas_evaluate","font":"original.ttf","path":"missing.json","brief":"00000000"}"#,
+        ] {
+            let result = session.execute_line(command).unwrap();
+            assert!(!result.ok);
+            assert!(!result.error.unwrap_or_default().contains("unknown variant"));
+        }
+        assert_eq!(session.execute(Command::Info).data, before);
     }
 }

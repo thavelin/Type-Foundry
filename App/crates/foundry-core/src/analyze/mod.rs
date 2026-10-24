@@ -30,7 +30,16 @@ pub struct Options {
     pub format: OutputFormat,
     pub cache_dir: Option<PathBuf>,
     pub sheets: Vec<SheetFormat>,
+    pub profile: MeasurementProfile,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeasurementProfile {
+    #[default]
+    Full,
+    Atlas,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {

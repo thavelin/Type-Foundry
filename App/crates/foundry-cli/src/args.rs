@@ -4,6 +4,26 @@ use std::path::PathBuf;
 #[derive(Debug, PartialEq)]
 pub enum Cli {
     Help,
+    AtlasEvaluate {
+        font: String,
+        path: String,
+        brief: String,
+    },
+    Atlas {
+        paths: Vec<String>,
+        options: foundry_core::atlas::Options,
+    },
+    AtlasQuery {
+        path: String,
+        family: String,
+        limit: usize,
+        min_shared: usize,
+    },
+    AtlasBriefs {
+        path: String,
+        class: Option<String>,
+        limit: usize,
+    },
     Analyze {
         paths: Vec<String>,
         options: foundry_core::analyze::Options,
@@ -61,6 +81,10 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     match command.as_str() {
         "new" => parse_new(parsed),
         "analyze" => parse_analyze(parsed),
+        "atlas" => parse_atlas(parsed),
+        "atlas-query" => parse_atlas_query(parsed),
+        "atlas-briefs" => parse_atlas_briefs(parsed),
+        "atlas-evaluate" => parse_atlas_evaluate(parsed),
         "info" => parse_info(parsed),
         "check" => parse_check(parsed),
         "blend" => parse_blend(parsed),
@@ -133,6 +157,62 @@ fn parse_new(mut parsed: Parsed) -> Result<Cli, String> {
     })
 }
 
+fn parse_atlas_evaluate(mut parsed: Parsed) -> Result<Cli, String> {
+    require_positionals(&parsed, 1, "atlas-evaluate")?;
+    let font = parsed.positionals.remove(0);
+    let path = take_required(&mut parsed, "atlas")?;
+    let brief = take_required(&mut parsed, "brief")?;
+    reject_unknown(parsed)?;
+    Ok(Cli::AtlasEvaluate { font, path, brief })
+}
+fn parse_atlas(mut parsed: Parsed) -> Result<Cli, String> {
+    if parsed.positionals.is_empty() {
+        return Err("atlas needs measurement files or worker-store paths".into());
+    }
+    let options = foundry_core::atlas::Options {
+        output: parsed.flags.remove("out").map(PathBuf::from),
+        labels: parsed.flags.remove("labels").map(PathBuf::from),
+        family_aliases: parsed.flags.remove("family-aliases").map(PathBuf::from),
+        min_shared: atlas_number(&mut parsed, "min-shared", 12)?,
+        neighbors: atlas_number(&mut parsed, "neighbors", 5)?,
+        gap_count: atlas_number(&mut parsed, "gaps", 24)?,
+    };
+    let paths = std::mem::take(&mut parsed.positionals);
+    reject_unknown(parsed)?;
+    Ok(Cli::Atlas { paths, options })
+}
+fn atlas_number(parsed: &mut Parsed, flag: &str, default: usize) -> Result<usize, String> {
+    parsed
+        .flags
+        .remove(flag)
+        .map(|v| {
+            v.parse::<usize>()
+                .map_err(|_| format!("--{flag} requires a nonnegative integer"))
+        })
+        .unwrap_or(Ok(default))
+}
+fn parse_atlas_query(mut parsed: Parsed) -> Result<Cli, String> {
+    require_positionals(&parsed, 1, "atlas-query")?;
+    let path = parsed.positionals.remove(0);
+    let family = take_required(&mut parsed, "family")?;
+    let limit = atlas_number(&mut parsed, "limit", 5)?;
+    let min_shared = atlas_number(&mut parsed, "min-shared", 12)?;
+    reject_unknown(parsed)?;
+    Ok(Cli::AtlasQuery {
+        path,
+        family,
+        limit,
+        min_shared,
+    })
+}
+fn parse_atlas_briefs(mut parsed: Parsed) -> Result<Cli, String> {
+    require_positionals(&parsed, 1, "atlas-briefs")?;
+    let path = parsed.positionals.remove(0);
+    let class = parsed.flags.remove("class");
+    let limit = atlas_number(&mut parsed, "limit", 5)?;
+    reject_unknown(parsed)?;
+    Ok(Cli::AtlasBriefs { path, class, limit })
+}
 fn parse_analyze(mut parsed: Parsed) -> Result<Cli, String> {
     use foundry_core::analyze::{Options, OutputFormat};
     if parsed.positionals.is_empty() {
@@ -149,6 +229,13 @@ fn parse_analyze(mut parsed: Parsed) -> Result<Cli, String> {
         "md" => OutputFormat::Md,
         _ => return Err("--format must be json, csv, or md".into()),
     };
+    if let Some(v) = parsed.flags.remove("profile") {
+        options.profile = match v.as_str() {
+            "full" => foundry_core::analyze::MeasurementProfile::Full,
+            "atlas" => foundry_core::analyze::MeasurementProfile::Atlas,
+            _ => return Err("--profile must be full or atlas".into()),
+        };
+    }
     if let Some(v) = parsed.flags.remove("glyphs") {
         options.glyphs = v.split(',').map(str::to_string).collect();
     }
@@ -333,7 +420,11 @@ pub fn help_text() -> &'static str {
 foundry — local type foundry commands
 
   foundry new --name NAME [--upm 1000] --out FILE [--force]
-  foundry analyze PATH... [--out FOLDER] [--format json|csv|md] [--glyphs n,o,H,O] [--axes wght=600] [--weight-match 0.15] [--cache-dir FOLDER] [--sheets png,pdf]
+  foundry atlas-evaluate FONT --atlas SNAPSHOT --brief ID
+  foundry atlas STUDIES... [--out FOLDER] [--labels FILE] [--family-aliases FILE] [--min-shared 12] [--neighbors 5] [--gaps 24]
+  foundry atlas-query SNAPSHOT --family NAME [--limit 5]
+  foundry atlas-briefs SNAPSHOT [--class CLASS] [--limit 5]
+  foundry analyze PATH... [--out FOLDER] [--format json|csv|md] [--glyphs n,o,H,O] [--axes wght=600] [--weight-match 0.15] [--cache-dir FOLDER] [--sheets png,pdf] [--profile full|atlas]
   foundry info FILE
   foundry check A B
   foundry blend A B [--t 0.5] --out FILE [--force]
@@ -419,6 +510,43 @@ mod analyzer_args_tests {
             "analyze a.ttf --typo true",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad}");
+        }
+    }
+}
+#[cfg(test)]
+mod atlas_args_tests {
+    use super::*;
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+    #[test]
+    fn atlas_build_query_brief_and_evaluate_options() {
+        assert!(matches!(
+            parse(&args("atlas store --out library --min-shared 12 --gaps 20")).unwrap(),
+            Cli::Atlas { .. }
+        ));
+        assert!(matches!(
+            parse(&args("atlas-query library/latest.json --family Vostok")).unwrap(),
+            Cli::AtlasQuery { .. }
+        ));
+        assert!(matches!(
+            parse(&args("atlas-briefs library/latest.json --limit 3")).unwrap(),
+            Cli::AtlasBriefs { .. }
+        ));
+        assert!(matches!(
+            parse(&args(
+                "atlas-evaluate new.ttf --atlas library/latest.json --brief 00000000"
+            ))
+            .unwrap(),
+            Cli::AtlasEvaluate { .. }
+        ));
+        for bad in [
+            "atlas",
+            "atlas-query a.json",
+            "atlas-evaluate a.ttf --atlas a.json",
+            "atlas a.json --gaps bad",
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad}");
         }
     }
 }

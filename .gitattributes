@@ -1,0 +1,5 @@
+App/crates/foundry-core/src/atlas/explore.html text eol=lf
+App/crates/foundry-core/src/atlas/vendor/* text eol=lf
+tools/*.py text eol=lf
+tools/*.cjs text eol=lf
+tools/migrations/*.sql text eol=lf

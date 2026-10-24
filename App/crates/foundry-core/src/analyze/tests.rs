@@ -591,3 +591,59 @@ fn raster_and_pdf_sheets_are_idempotent() {
     .unwrap();
     assert!(png.starts_with(b"\x89PNG"));
 }
+#[test]
+fn atlas_profile_defers_complex_area_without_fake_zero() {
+    let dir = Temp::new();
+    let mut font = fixture("geometric sans");
+    let contour = font.glyph("n").unwrap().contours[0].clone();
+    for _ in 0..25 {
+        font.glyph_mut("n").unwrap().contours.push(contour.clone());
+    }
+    let path = dir.font("complex.json", &font);
+    let report = analyze_fonts(
+        &[path],
+        &Options {
+            profile: MeasurementProfile::Atlas,
+            glyphs: vec!["n".into()],
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let s = &report.fonts[0];
+    assert_eq!(s.metadata["measurement_profile"], "atlas");
+    assert!(s.glyphs["n"]["ink_area"].value.is_none());
+    assert!(
+        s.glyphs["n"]["ink_area"]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("budget")
+    );
+    assert!(s.glyphs["n"]["quality.overlaps"].value.is_none());
+    assert!(s.metrics["spacing.texture_greyness"].value.is_none());
+    assert!(s.metrics["stems.lowercase"].value.is_some());
+}
+#[test]
+fn selected_binary_outline_import_preserves_reference_measurements() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/OriginalVariable.ttf");
+    let paths = [p.to_string_lossy().into_owned()];
+    let full = analyze_fonts(&paths, &Options::default()).unwrap();
+    let selected = analyze_fonts(
+        &paths,
+        &Options {
+            glyphs: vec!["n".into(), "H".into()],
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    for (a, b) in full.fonts.iter().zip(&selected.fonts) {
+        for key in [
+            "proportions.x_cap",
+            "weight.stem_x_height",
+            "stems.uppercase",
+        ] {
+            assert_eq!(a.metrics[key].value, b.metrics[key].value);
+        }
+        assert_eq!(a.metadata, b.metadata);
+    }
+}

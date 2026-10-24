@@ -551,3 +551,200 @@ small binary fixtures with `tests/fixtures/generate_variable.py` (fontTools is n
 only to regenerate them). Sources for format/data definitions:
 [WOFF 1.0](https://www.w3.org/TR/WOFF/#WOFFHeader),
 [Unicode 17 Blocks](https://www.unicode.org/Public/17.0.0/ucd/Blocks.txt).
+
+## Font Atlas: a persistent design knowledge base
+
+The next layer consumes measurement reports, not outlines. It groups faces into
+families, builds an interpretable measured feature space, discovers neighborhoods,
+and proposes supported gaps as briefs for **original** construction. It does not
+reconstruct another font, train a generative model, or make originality claims.
+
+### Scan, resume, and build
+
+```text
+python tools/scan_font_library.py --foundry /path/to/foundry --store /local/font-worker --roots /fonts --jobs 3 --atlas-out /reports/font-atlas
+foundry atlas /local/font-worker/studies /local/font-worker/sources.json --out /reports/font-atlas
+foundry atlas-query /reports/font-atlas/latest.json --family "Vostok Serif v3"
+foundry atlas-briefs /reports/font-atlas/latest.json --class "serif text" --limit 5
+foundry atlas-evaluate original.ttf --atlas /reports/font-atlas/latest.json --brief GAP_ID
+```
+
+The worker is Python standard-library orchestration around the Rust CLI, with no
+Python font parser or embedding implementation. It hashes source contents, stores
+one measurement object per content/profile/engine identity, and retains every
+source path as an alias in an indexed SQLite worker database. Byte-identical copies
+are measured once per worker. Collection faces and variable locations stay distinct.
+The atlas then deduplicates across workers by source SHA-256, collection face and
+axis coordinates; a default and named instance at identical coordinates count once.
+Where full/bulk objects coexist, the object with more available numeric metrics wins.
+
+Worker persistence starts at `tools/migrations/001_font_library.sql`. Keep worker
+SQLite on a local disk, rather than SMB. Raw measurement JSON and inventories are
+portable. File locks prevent overlapping scans of one store and release on process
+exit. A scan resumes completed objects; `--retry-errors` retries recorded failures.
+`--inventory FILE` accepts `{"paths":["/absolute/font.ttf",...]}` for indexed NAS
+sources. `--timeout` limits one unique file; timeout is an explicit status, not a
+successful empty measurement. `progress.json` and `sources.json` retain counts,
+unsupported formats, exceptions and coverage. Discovery skips build/dependency/test
+folders, symlinks, archive directories and do-not-index paths. WOFF2/EOT are recorded
+as unsupported, never silently unpacked or copied to a different format.
+
+Large libraries use `analyze --profile atlas` with diagnostic/requested outlines.
+The importer still reads every name, advance, Unicode mapping and metadata field,
+but does not decompose irrelevant non-ASCII glyphs. Full `open` remains unchanged.
+The atlas profile defers quadratic overlap census and returns null for area/darkness
+on glyphs with more than 24 contours or 600 points. Greyness becomes null if a required
+pangram area is unavailable. Each deferred result records its reason and the profile
+is included in metadata/cache identity. Ordinary area values retain the full method;
+per-font area results are memoized. Use the full profile on selected designs when
+performing detailed quality work.
+
+### Families, classes and neighborhoods
+
+Family identity uses a normalized **exact** family name (case/spacing normalized;
+style/version words are not guessed away). It retains raw name aliases and source
+locations. Coincident family names from unrelated producers can still need review;
+there is no automatic foundry attribution or silent superfamily merge.
+
+One upright, regular-width face near weight 400 represents each family while fitting
+normalization and projecting the map. Coverage is part of representative selection;
+italic angle and explicit Italic/Oblique style names receive a penalty. All styles
+remain in the atlas with their own feature vectors and within-family ranges. A
+family with 80 variable instances receives one fitting vote, like a one-style family.
+Raw class distributions are retained. Labels below confidence 0.4, or faces with
+fewer than 12 measured dimensions, are withheld as `unclassified` in the atlas.
+Classifier confidence is uncalibrated; this is not an authoritative taxonomy.
+
+The explorer exports reviewed labels with evidence:
+
+```json
+{"FAMILY_ID_OR_EXACT_NAME":{"class":"humanist sans","reason":"Reviewed open apertures and oblique stress in the specimen"}}
+```
+
+Rebuild with `--labels labels.json` (run option `labels`) to apply them. Corrections
+have explicit provenance and do not mutate source fonts or silently edit a snapshot.
+Classes are geometric sans, grotesque, humanist sans, serif text, slab, mono, display,
+script and unclassified. Family neighborhoods use a deterministic greedy densest-anchor
+algorithm within a class, radius <=0.9 in full measured space, at least three families.
+Membership is bounded by anchor distance; it does not chain indefinitely through a graph.
+
+### Measured embedding contract
+
+`format: "typefoundry.atlas"`, `version: 1`, embedding recipe
+`measured-font-space-v1`; `space_id` hashes the fitted dimension definitions,
+centers and scales. **Compare stored vectors only within the same space_id.** New
+families can change calibration on rebuild. Raw features remain portable so a later
+index can refit all observations together. Legacy v1 snapshots without space_id
+load by deriving it from their existing calibration; unknown versions are refused.
+
+There are 33 dimensions in 10 design domains: proportions, weight, contrast, width,
+overshoot, arch, counter, serif, spacing and texture. These include height ratios,
+n/H stem color, o contrast and double-angle stress sine/cosine, n/o/H/O widths,
+overshoots, n arch profile, counter exponent/radius/handles, foot extension, bearings
+and greyness. Lengths divide by x-height, contrast is log-transformed, and angles
+use sine/cosine of twice the angle. Every dimension includes its label, domain,
+transform, calibration and measured-family count. The definition order is versioned.
+
+Calibration is family-balanced median and IQR/1.349 with a documented minimum scale
+for each dimension. Coordinates are clipped to +/-5 standardized units. Every face
+and family carries raw nullable values, numeric vector and availability mask. Missing
+values are median-imputed only for PCA display and remain masked for distance. They
+are never treated as measured zero. Distance is RMS within each shared design domain,
+then RMS across domains; correlated width/arch columns cannot buy extra domain weight.
+At least 12 shared dimensions across four domains are required by default. Nearest
+results report shared coverage and the largest standardized differences. Default
+neighbors=5; configurable 1..50 and `min_shared` 4..33.
+
+The 2D explorer uses centered PCA with deterministic power iterations and stable
+axis signs. Explained variance and loadings are retained. PCA is a lossy index view,
+not the embedding itself: close dots can differ in hidden dimensions, and blank plot
+pixels are not a design-gap test. You can instead choose actual measured axes, filter
+classes, search families, inspect styles and see all numeric evidence and sources.
+Chart.js 4.5.1 is vendored with its MIT license; the generated HTML embeds both data
+and renderer and needs no network requests, font embeds, service, account or API key.
+
+### Gap proposals and original-design loop
+
+For each class with >=8 sufficiently confident families, deterministic candidates
+start as convex combinations of three neighboring family representatives. Stress
+sine/cosine targets are projected back to a unit direction (ambiguous zero directions
+are masked), and the n/H advance ratio is derived from the two target advances.
+These algebraic constraints avoid proposing impossible vectors; the full geometry
+still needs construction and testing. Candidate
+masks require shared measured evidence. Candidates must be >=0.25 distance from the
+nearest measured face across **all** styles/classes, and <=2.0 from the third-nearest
+same-class family; ranking and diversification use
+**full-space** group-balanced distances, not the PCA projection. At most 24 are kept
+by default (`--gaps` / `gap_count`, 0..200). Supporting neighbors, actual numeric
+targets, transforms, mask, score and original-design instructions accompany each brief.
+
+A gap means an underrepresented combination **in this collection**. It does not show
+that the combination is globally new, technically feasible, attractive, or useful.
+The score is not a probability or a typeface originality test. These are construction
+hypotheses: draw a new skeleton, establish n/o/H/O, space them, then test words and
+sizes. No reference outline coordinates enter briefs or the atlas.
+
+`atlas-evaluate` reads an original font and compares it to a selected gap. It reports
+full-space distance, shared dimensions, and signed per-feature differences sorted by
+size, including whether a measured feature should increase/decrease or is near the
+target. This closes the numerical iteration loop without changing a font or implying
+that matching the vector guarantees quality. An exact ID or unique prefix >=8
+characters selects a brief. JSON results can be retained as experiment evidence.
+
+Class observations require >=5 families and report 10th/median/90th percentiles.
+Cross-domain descriptive associations require >=12 paired families and |r|>=0.65.
+They are exploratory observations with sample counts, not causal laws, significance
+tests or universal advice. Classifier errors and collection bias affect them.
+
+### Persistent outputs and command/MCP access
+
+`--out` creates immutable `atlas-HASH.json` snapshots, an owned `explore.html`, and
+an atomic `latest.json` pointer with full checksum. Existing unrelated output files
+are refused. Readers validate the pointer checksum and array/mask shapes. Schema:
+[typefoundry.atlas.schema.json](typefoundry.atlas.schema.json). The snapshots contain
+measurement features, source paths/licenses, families, vectors, calibration, neighbor
+graphs, neighborhoods, observations, briefs, coverage and failures; no font outlines.
+
+Run operations (none change the active font or undo history):
+
+```json
+{"op":"atlas_build","paths":["/worker/studies","/worker/sources.json"],"options":{"output":"/atlas","min_shared":12,"neighbors":5,"gap_count":24}}
+{"op":"atlas_query","path":"/atlas/latest.json","family":"Vostok Serif v3","limit":5}
+{"op":"atlas_briefs","path":"/atlas/latest.json","class":"serif text","limit":5}
+{"op":"atlas_evaluate","font":"original.ttf","path":"/atlas/latest.json","brief":"GAP_ID","options":{"profile":"atlas"}}
+```
+
+MCP tools: `build_font_atlas(paths, options)`, `query_font_atlas(path, family, limit,
+min_shared)`, `font_design_briefs(path, class, limit)`, and
+`evaluate_font_brief(font, path, brief, options)`. Build writes owned artifact files;
+query/brief/evaluation tools are source-read-only. CLI `atlas` prints a compact build
+summary. JSON/HTML are standalone exports; this is an exact small-collection vector
+index, not a hosted vector database or learned latent font generator.
+
+Validation covers family-balanced calibration, content deduplication/source aliases,
+masked missing evidence, deterministic ordering, domain weighting, full-space gaps,
+PCA degeneracy, reviewed labels, safe HTML serialization, pointer checksums/output
+ownership, roundtrip queries and read-only original-font evaluation. Python tests
+exercise migrations, discovery exclusions and actual engine scan/resume/deduplication.
+`tools/test_atlas_browser.cjs` exercises search, filters, actual axes, family details,
+class observations, coverage, gap briefs and desktop/mobile layouts against real data.
+
+Family grouping corrections are separate from class labels. `--family-aliases FILE`
+(run option `family_aliases`) accepts evidence-backed mappings:
+
+```json
+{"Example Book Italic":{"family":"Example","reason":"Shared PostScript root verified in the source name table"}}
+```
+
+The atlas keeps the original face names, all source aliases and grouping notes.
+Only the family grouping key changes. This is useful for fonts whose legacy (or even
+nominal typographic) family field contains weight/style words while the PostScript
+root identifies the family. It does not silently strip style words from every font.
+The explorer exposes grouping evidence. Family aliases change the fitted population
+and therefore can change space_id; rebuild neighbors/gaps together after applying them.
+
+The explorer can plot either family representatives or all measured face locations.
+Calibration stays family-balanced in both views. Gap occupancy always checks all
+measured styles, so an existing bold or italic cannot be ignored simply because it
+is not the family representative. Briefs expose the closest measured face as well
+as three supporting family representatives.

@@ -66,6 +66,16 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
 
 /// Read one selected face/location without changing its source.
 pub(crate) fn read_face(face: &Face<'_>, fallback_name: &str) -> Result<Font, String> {
+    read_face_subset(face, fallback_name, None)
+}
+
+/// Analyzer imports only diagnostic/requested outlines, while retaining all names, advances and metadata.
+/// Existing font import remains complete. This avoids decomposing thousands of irrelevant CJK glyphs.
+pub(crate) fn read_face_subset(
+    face: &Face<'_>,
+    fallback_name: &str,
+    subset: Option<&[String]>,
+) -> Result<Font, String> {
     let upm = face.units_per_em();
     if !(MIN_UPM..=MAX_UPM).contains(&upm) {
         return Err(format!("units per em {upm} is outside {MIN_UPM}-{MAX_UPM}"));
@@ -112,7 +122,19 @@ pub(crate) fn read_face(face: &Face<'_>, fallback_name: &str) -> Result<Font, St
         };
         let mut pen = Pen::default();
         // `None` means the glyph has no outline, such as a space. That is not an error.
-        let _ = face.outline_glyph(id, &mut pen);
+        let keep = subset.is_none_or(|names| {
+            unicode.is_some_and(|c| c < 128)
+                || names.iter().any(|s| {
+                    s == &name
+                        || unicode
+                            .and_then(char::from_u32)
+                            .is_some_and(|c| s == &c.to_string())
+                        || unicode.is_some_and(|c| s.eq_ignore_ascii_case(&format!("U+{c:04X}")))
+                })
+        });
+        if keep {
+            let _ = face.outline_glyph(id, &mut pen);
+        }
         let glyph = Glyph {
             name,
             unicode,
@@ -126,7 +148,9 @@ pub(crate) fn read_face(face: &Face<'_>, fallback_name: &str) -> Result<Font, St
     }
     font.glyphs = glyphs;
     import_kern(face, &mut font);
-    import_ligatures(face, &mut font);
+    if subset.is_none() {
+        import_ligatures(face, &mut font);
+    }
     Ok(font)
 }
 

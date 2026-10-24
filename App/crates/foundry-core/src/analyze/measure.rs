@@ -35,7 +35,7 @@ fn selected(g: &Glyph, options: &Options) -> bool {
         })
 }
 
-pub(super) fn study(font: &Font, source: Source, metadata: Value, options: &Options) -> Study {
+pub(super) fn study(font: &Font, source: Source, mut metadata: Value, options: &Options) -> Study {
     let outlines: BTreeMap<_, _> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         .chars()
         .filter_map(|c| glyph(font, c).map(|g| (c, Outline::new(g))))
@@ -434,6 +434,21 @@ pub(super) fn study(font: &Font, source: Source, metadata: Value, options: &Opti
         &[],
     );
     drop(add);
+    metadata["measurement_profile"] = json!(options.profile);
+    let bulk = options.profile == MeasurementProfile::Atlas;
+    let mut area_cache: BTreeMap<String, Option<f64>> = BTreeMap::new();
+    let mut area_for = |g: &Glyph| {
+        *area_cache.entry(g.name.clone()).or_insert_with(|| {
+            if bulk
+                && (g.contours.len() > 24
+                    || g.contours.iter().map(|c| c.points.len()).sum::<usize>() > 600)
+            {
+                None
+            } else {
+                super::advanced::ink_area(g)
+            }
+        })
+    };
     let mut rows = BTreeMap::new();
     for g in font.glyphs.iter().filter(|g| selected(g, options)) {
         let o = Outline::new(g);
@@ -479,7 +494,7 @@ pub(super) fn study(font: &Font, source: Source, metadata: Value, options: &Opti
         let area = if g.contours.is_empty() {
             Some(0.)
         } else {
-            super::advanced::ink_area(g)
+            area_for(g)
         };
         put(
             "ink_area",
@@ -495,8 +510,7 @@ pub(super) fn study(font: &Font, source: Source, metadata: Value, options: &Opti
             "ink area / advance; normalize by x-height for dimensionless coverage",
         );
         for c in ['n', 'H'] {
-            let ref_dark =
-                glyph(font, c).and_then(|g| ratio(super::advanced::ink_area(g), Some(g.advance)));
+            let ref_dark = glyph(font, c).and_then(|g| ratio(area_for(g), Some(g.advance)));
             put(
                 &format!("darkness_relative_{c}"),
                 ratio(darkness, ref_dark),
@@ -608,7 +622,24 @@ pub(super) fn study(font: &Font, source: Source, metadata: Value, options: &Opti
             "count",
             "positive exact signed area",
         );
-        row.insert("quality.overlaps".into(),Metric::new(Some(super::advanced::overlap_count(g) as f64),"count","12-step curve polygon intersection flags plus same-winding nested contours; approximate, tangencies may be missed",&used,xh,cp));
+        row.insert("quality.overlaps".into(),Metric::new(if bulk{None}else{Some(super::advanced::overlap_count(g) as f64)},"count","12-step curve polygon intersection flags plus same-winding nested contours; approximate, tangencies may be missed",&used,xh,cp));
+        if bulk {
+            if let Some(m) = row.get_mut("quality.overlaps") {
+                m.reason=Some("atlas profile defers quadratic overlap census; use full profile on selected fonts".into());
+            }
+            if area.is_none() {
+                for key in [
+                    "ink_area",
+                    "darkness",
+                    "darkness_relative_n",
+                    "darkness_relative_H",
+                ] {
+                    if let Some(m) = row.get_mut(key) {
+                        m.reason=Some("atlas profile area budget exceeded (>24 contours or >600 points); not measured zero".into());
+                    }
+                }
+            }
+        }
         rows.insert(g.name.clone(), row);
     }
     // Copy the key width/spacing table into the scalar feature map used by class ranges.
@@ -640,13 +671,26 @@ pub(super) fn study(font: &Font, source: Source, metadata: Value, options: &Opti
     let mut complete = true;
     for c in text.chars() {
         if let Some(g) = glyph(font, c) {
-            area += super::advanced::ink_area(g).unwrap_or(0.);
+            if let Some(value) = area_for(g) {
+                area += value;
+            } else {
+                complete = false;
+            }
             advance += g.advance;
         } else {
             complete = false;
         }
     }
     metrics.insert("spacing.texture_greyness".into(),Metric::new(if complete {ratio(Some(area),Some(advance*(font.metrics.ascender-font.metrics.descender)))}else{None},"ratio","sum outline ink areas / (unshaped advances * declared ascender-descender); standard ASCII pangram plus digits; no kerning",&[text],xh,cp));
+    if bulk
+        && !complete
+        && let Some(m) = metrics.get_mut("spacing.texture_greyness")
+    {
+        m.reason = Some(
+            "atlas profile: a pangram glyph is missing or exceeds the area complexity budget"
+                .into(),
+        );
+    }
     let terminals = super::advanced::terminals(font, xh, cp);
     for c in "cesrCGS".chars() {
         let value = terminals

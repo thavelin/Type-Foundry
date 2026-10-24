@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TypeFoundry measured family atlas v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "embedding",
+    "space_id",
+    "dimensions",
+    "faces",
+    "families",
+    "clusters",
+    "gaps",
+    "principles",
+    "projection",
+    "inventory",
+    "warnings",
+    "source_errors"
+  ],
+  "properties": {
+    "format": {
+      "const": "typefoundry.atlas"
+    },
+    "version": {
+      "const": 1
+    },
+    "embedding": {
+      "const": "measured-font-space-v1"
+    },
+    "space_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 33,
+      "maxItems": 33,
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "group",
+          "method",
+          "center",
+          "scale",
+          "measured_families"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "center": {
+            "type": "number"
+          },
+          "scale": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "measured_families": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "faces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "raw",
+          "vector",
+          "mask",
+          "family_id",
+          "family",
+          "sources",
+          "class",
+          "coverage"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "raw": {
+            "type": "array",
+            "minItems": 33,
+            "maxItems": 33,
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "vector": {
+            "type": "array",
+            "minItems": 33,
+            "maxItems": 33,
+            "items": {
+              "type": "number"
+            }
+          },
+          "mask": {
+            "type": "array",
+            "minItems": 33,
+            "maxItems": 33,
+            "items": {
+              "type": "boolean"
+            }
+          },
+          "family_id": {
+            "type": "string"
+          },
+          "family": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "array"
+          },
+          "class": {
+            "type": "string"
+          },
+          "coverage": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "families": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "raw",
+          "vector",
+          "mask",
+          "name",
+          "representative",
+          "class",
+          "confidence",
+          "projection",
+          "neighbors",
+          "ranges",
+          "label_source"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "raw": {
+            "type": "array",
+            "minItems": 33,
+            "maxItems": 33,
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "vector": {
+            "type": "array",
+            "minItems": 33,
+            "maxItems": 33,
+            "items": {
+              "type": "number"
+            }
+          },
+          "mask": {
+            "type": "array",
+            "minItems": 33,
+            "maxItems": 33,
+            "items": {
+              "type": "boolean"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "representative": {
+            "type": "string"
+          },
+          "class": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "projection": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "number"
+            }
+          },
+          "neighbors": {
+            "type": "array"
+          },
+          "ranges": {
+            "type": "array"
+          },
+          "label_source": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "clusters": {
+      "type": "array"
+    },
+    "gaps": {
+      "type": "array"
+    },
+    "principles": {
+      "type": "array"
+    },
+    "projection": {
+      "type": "object"
+    },
+    "inventory": {
+      "type": "object"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_errors": {
+      "type": "array"
+    }
+  }
+}

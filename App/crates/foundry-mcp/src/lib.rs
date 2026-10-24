@@ -109,6 +109,10 @@ impl Server {
             Some(_) => return Err((INVALID_PARAMS, "arguments must be an object".to_string())),
         };
         let op = match name {
+            "evaluate_font_brief" => "atlas_evaluate",
+            "build_font_atlas" => "atlas_build",
+            "query_font_atlas" => "atlas_query",
+            "font_design_briefs" => "atlas_briefs",
             "analyze_fonts" => "analyze",
             "classify_font" => "classify_font",
             "compare_to_class" => "compare_to_class",
@@ -909,7 +913,7 @@ fn tool_list() -> Value {
     ]) {
         tools.extend(more);
     }
-    let options = json!({"type":"object","additionalProperties":false,"properties":{"glyphs":{"type":"array","items":{"type":"string"}},"axes":{"type":"object","additionalProperties":{"type":"number"}},"weight_match":{"type":"number","exclusiveMinimum":0},"output":{"type":"string"},"format":{"enum":["json","csv","md"]},"cache_dir":{"type":"string"},"sheets":{"type":"array","items":{"enum":["png","pdf"]}}}});
+    let options = json!({"type":"object","additionalProperties":false,"properties":{"glyphs":{"type":"array","items":{"type":"string"}},"axes":{"type":"object","additionalProperties":{"type":"number"}},"weight_match":{"type":"number","exclusiveMinimum":0},"output":{"type":"string"},"format":{"enum":["json","csv","md"]},"cache_dir":{"type":"string"},"sheets":{"type":"array","items":{"enum":["png","pdf"]}},"profile":{"enum":["full","atlas"]}}});
     for (name, required, properties) in [
         (
             "analyze_fonts",
@@ -933,6 +937,30 @@ fn tool_list() -> Value {
         ),
     ] {
         tools.push(json!({"name":name,"description":"Read-only vector measurements and heuristic collection classification. Returns typefoundry.study v2; per-file failures appear in errors.","inputSchema":{"type":"object","required":required,"properties":properties,"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}));
+    }
+    tools.push(json!({"name":"evaluate_font_brief","description":"Measure an original font against a gap design brief. Returns feature differences and directions without modifying or copying source outlines.","inputSchema":{"type":"object","required":["font","path","brief"],"properties":{"font":{"type":"string"},"path":{"type":"string"},"brief":{"type":"string"},"options":options},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}));
+    let atlas_options = json!({"type":"object","additionalProperties":false,"properties":{"output":{"type":"string"},"labels":{"type":"string"},"family_aliases":{"type":"string"},"min_shared":{"type":"integer","minimum":4,"default":12},"neighbors":{"type":"integer","minimum":1,"maximum":50},"gap_count":{"type":"integer","minimum":0,"maximum":200}}});
+    for (name, required, properties, read_only) in [
+        (
+            "build_font_atlas",
+            json!(["paths"]),
+            json!({"paths":{"type":"array","minItems":1,"items":{"type":"string"}},"options":atlas_options}),
+            false,
+        ),
+        (
+            "query_font_atlas",
+            json!(["path", "family"]),
+            json!({"path":{"type":"string"},"family":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"min_shared":{"type":"integer","minimum":4}}),
+            true,
+        ),
+        (
+            "font_design_briefs",
+            json!(["path"]),
+            json!({"path":{"type":"string"},"class":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}}),
+            true,
+        ),
+    ] {
+        tools.push(json!({"name":name,"description":"Explore a local measurement-only font knowledge base: family-balanced vectors, neighbors, class observations and evidence-backed original-design briefs. Gaps are collection hypotheses, not proof of global novelty.","inputSchema":{"type":"object","required":required,"properties":properties,"additionalProperties":false},"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}));
     }
     Value::Array(tools)
 }
@@ -1033,7 +1061,7 @@ mod tests {
         assert!(names.contains(&"decision_record"));
         assert!(names.contains(&"font_critique"));
         assert!(names.contains(&"critique_resolve"));
-        assert_eq!(names.len(), 56);
+        assert_eq!(names.len(), 60);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }
@@ -1215,5 +1243,37 @@ mod analyzer_tool_tests {
             assert_eq!(reply["result"]["isError"], false, "{reply}");
         }
         assert!(server.session.font().is_none());
+    }
+}
+#[cfg(test)]
+mod atlas_tool_tests {
+    use super::*;
+    #[test]
+    fn atlas_tools_advertise_and_dispatch() {
+        let mut server = Server::new();
+        let list = tool_list();
+        let tools = list.as_array().unwrap();
+        for (id, name, args) in [
+            (1, "build_font_atlas", json!({"paths":[]})),
+            (
+                2,
+                "query_font_atlas",
+                json!({"path":"missing.json","family":"Vostok"}),
+            ),
+            (3, "font_design_briefs", json!({"path":"missing.json"})),
+            (
+                4,
+                "evaluate_font_brief",
+                json!({"font":"original.ttf","path":"missing.json","brief":"00000000"}),
+            ),
+        ] {
+            assert!(tools.iter().any(|t| t["name"] == name));
+            let response=server.handle_message(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
+            assert_eq!(response["result"]["isError"], true, "{response}");
+            assert!(
+                response["error"].is_null(),
+                "tool must dispatch to an application-level error"
+            );
+        }
     }
 }

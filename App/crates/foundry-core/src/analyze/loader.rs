@@ -165,7 +165,7 @@ pub(super) fn analyze_path(path: &Path, options: &Options) -> Result<Vec<Study>,
         ));
     }
     let hash = digest_path(path)?;
-    let key=super::hash(&serde_json::to_vec(&json!({"hash":hash,"algorithm":ALGORITHM,"version":VERSION,"axes":options.axes,"glyphs":options.glyphs,"weight_match":options.weight_match})).map_err(|e|e.to_string())?);
+    let key=super::hash(&serde_json::to_vec(&json!({"hash":hash,"algorithm":ALGORITHM,"version":VERSION,"axes":options.axes,"glyphs":options.glyphs,"weight_match":options.weight_match,"profile":options.profile})).map_err(|e|e.to_string())?);
     let cache = options
         .cache_dir
         .as_ref()
@@ -224,9 +224,14 @@ pub(super) fn analyze_path(path: &Path, options: &Options) -> Result<Vec<Study>,
                     face.set_variation(tag, *value)
                         .ok_or("could not apply variation")?;
                 }
-                let mut font = crate::sfnt::read_face(
+                let mut font = crate::sfnt::read_face_subset(
                     &face,
                     path.file_stem().and_then(|s| s.to_str()).unwrap_or("Font"),
+                    if options.glyphs.is_empty() {
+                        None
+                    } else {
+                        Some(&options.glyphs)
+                    },
                 )?;
                 if name != "default" {
                     font.style.name = name.clone();
