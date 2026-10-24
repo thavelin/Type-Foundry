@@ -4,6 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, PartialEq)]
 pub enum Cli {
     Help,
+    Analyze {
+        paths: Vec<String>,
+        options: foundry_core::analyze::Options,
+    },
     New {
         name: String,
         upm: u16,
@@ -56,6 +60,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     let parsed = parse_flags(rest)?;
     match command.as_str() {
         "new" => parse_new(parsed),
+        "analyze" => parse_analyze(parsed),
         "info" => parse_info(parsed),
         "check" => parse_check(parsed),
         "blend" => parse_blend(parsed),
@@ -128,6 +133,58 @@ fn parse_new(mut parsed: Parsed) -> Result<Cli, String> {
     })
 }
 
+fn parse_analyze(mut parsed: Parsed) -> Result<Cli, String> {
+    use foundry_core::analyze::{Options, OutputFormat};
+    if parsed.positionals.is_empty() {
+        return Err("analyze needs one or more paths".into());
+    }
+    let mut options = Options {
+        output: parsed.flags.remove("out").map(PathBuf::from),
+        cache_dir: parsed.flags.remove("cache-dir").map(PathBuf::from),
+        ..Options::default()
+    };
+    options.format = match parsed.flags.remove("format").as_deref().unwrap_or("json") {
+        "json" => OutputFormat::Json,
+        "csv" => OutputFormat::Csv,
+        "md" => OutputFormat::Md,
+        _ => return Err("--format must be json, csv, or md".into()),
+    };
+    if let Some(v) = parsed.flags.remove("glyphs") {
+        options.glyphs = v.split(',').map(str::to_string).collect();
+    }
+    if let Some(v) = parsed.flags.remove("weight-match") {
+        options.weight_match = Some(v.parse().map_err(|_| "--weight-match requires a number")?);
+    }
+    if let Some(v) = parsed.flags.remove("axes") {
+        for axis in v.split(',') {
+            let (tag, coordinate) = axis
+                .split_once('=')
+                .ok_or("--axes requires tag=value,tag=value")?;
+            if options
+                .axes
+                .insert(
+                    tag.into(),
+                    coordinate.parse().map_err(|_| "invalid axis coordinate")?,
+                )
+                .is_some()
+            {
+                return Err("duplicate axis tag".into());
+            }
+        }
+    }
+    if let Some(v) = parsed.flags.remove("sheets") {
+        for format in v.split(',') {
+            options.sheets.push(match format {
+                "png" => foundry_core::analyze::SheetFormat::Png,
+                "pdf" => foundry_core::analyze::SheetFormat::Pdf,
+                _ => return Err("--sheets must be png,pdf".into()),
+            });
+        }
+    }
+    let paths = std::mem::take(&mut parsed.positionals);
+    reject_unknown(parsed)?;
+    Ok(Cli::Analyze { paths, options })
+}
 fn parse_info(parsed: Parsed) -> Result<Cli, String> {
     let path = one_path(parsed, "info")?;
     Ok(Cli::Info { path })
@@ -276,6 +333,7 @@ pub fn help_text() -> &'static str {
 foundry — local type foundry commands
 
   foundry new --name NAME [--upm 1000] --out FILE [--force]
+  foundry analyze PATH... [--out FOLDER] [--format json|csv|md] [--glyphs n,o,H,O] [--axes wght=600] [--weight-match 0.15] [--cache-dir FOLDER] [--sheets png,pdf]
   foundry info FILE
   foundry check A B
   foundry blend A B [--t 0.5] --out FILE [--force]
@@ -340,5 +398,27 @@ mod tests {
         assert!(parse(&args("new --name Wide")).is_err());
         assert_eq!(parse(&args("mcp")).unwrap(), Cli::Mcp);
         assert!(parse(&args("mcp extra")).is_err());
+    }
+}
+#[cfg(test)]
+mod analyzer_args_tests {
+    use super::*;
+    #[test]
+    fn analyze_options_and_bad_inputs() {
+        let argv = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let Cli::Analyze{paths,options}=parse(&argv("analyze a.ttf b.ufo --axes wght=500,wdth=90 --glyphs n,o,H --format csv --out reports --cache-dir cache")).unwrap()else{panic!("wrong command");};
+        assert_eq!(paths.len(), 2);
+        assert_eq!(options.axes["wght"], 500.);
+        assert_eq!(options.glyphs, vec!["n", "o", "H"]);
+        assert_eq!(options.format, foundry_core::analyze::OutputFormat::Csv);
+        for bad in [
+            "analyze",
+            "analyze a.ttf --format bad",
+            "analyze a.ttf --axes wght=1,wght=2",
+            "analyze a.ttf --axes wght",
+            "analyze a.ttf --typo true",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad}");
+        }
     }
 }

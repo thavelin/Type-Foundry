@@ -21,6 +21,27 @@ pub use foundry_core::GlyphGroup;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
+    Analyze {
+        paths: Vec<String>,
+        #[serde(default)]
+        options: foundry_core::analyze::Options,
+    },
+    ClassifyFont {
+        path: String,
+    },
+    CompareToClass {
+        path: String,
+        class: String,
+        collection: Vec<String>,
+        #[serde(default)]
+        options: foundry_core::analyze::Options,
+    },
+    NearestFonts {
+        path: String,
+        collection: Vec<String>,
+        #[serde(default)]
+        options: foundry_core::analyze::Options,
+    },
     Create {
         name: String,
         #[serde(default = "default_upm")]
@@ -1137,6 +1158,33 @@ impl Session {
                 }
                 Ok(Some(json!({ "path": path })))
             }
+            Command::Analyze { paths, options } => {
+                let report = foundry_core::analyze::analyze_fonts(&paths, &options)
+                    .map_err(FoundryError::Import)?;
+                Ok(Some(
+                    serde_json::to_value(report).map_err(|e| FoundryError::Json(e.to_string()))?,
+                ))
+            }
+            Command::ClassifyFont { path } => Ok(Some(
+                foundry_core::analyze::classify_font(&path).map_err(FoundryError::Import)?,
+            )),
+            Command::CompareToClass {
+                path,
+                class,
+                collection,
+                options,
+            } => Ok(Some(
+                foundry_core::analyze::compare_to_class(&path, &class, &collection, &options)
+                    .map_err(FoundryError::Import)?,
+            )),
+            Command::NearestFonts {
+                path,
+                collection,
+                options,
+            } => Ok(Some(
+                foundry_core::analyze::nearest_fonts(&path, &collection, &options)
+                    .map_err(FoundryError::Import)?,
+            )),
             Command::Info => {
                 let id = self.active.ok_or(FoundryError::NoFont)?;
                 Ok(Some(self.summary(id)))
@@ -2962,5 +3010,51 @@ mod tests {
         assert_eq!(resolved.data.unwrap()["accepted"], json!(false));
         let listed = session.execute(Command::ListDecisions);
         assert_eq!(listed.data.unwrap()["count"], json!(2));
+    }
+}
+#[cfg(test)]
+mod analyzer_integration_tests {
+    use super::*;
+    #[test]
+    fn analyze_run_op_preserves_active_font_and_history() {
+        let mut session = Session::new();
+        assert!(
+            session
+                .execute(Command::Create {
+                    name: "Active".into(),
+                    upm: 1000
+                })
+                .ok
+        );
+        let before = session.execute(Command::Info).data;
+        let history = session.execute_line(r#"{"op":"history"}"#).unwrap().data;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../foundry-core/tests/fixtures/OriginalVariable.ttf");
+        let response = session
+            .execute_line(
+                &json!({"op":"analyze","paths":[path],"options":{"glyphs":["n","H"]}}).to_string(),
+            )
+            .unwrap();
+        assert!(response.ok, "{response:?}");
+        let data = response.data.unwrap();
+        assert_eq!(data["fonts"].as_array().unwrap().len(), 3);
+        assert_eq!(data["fonts"][0]["format"], "typefoundry.study");
+        assert_eq!(session.execute(Command::Info).data, before);
+        assert_eq!(
+            session.execute_line(r#"{"op":"history"}"#).unwrap().data,
+            history
+        );
+        assert!(
+            !session
+                .execute_line(r#"{"op":"analyze","paths":[],"options":{}}"#)
+                .unwrap()
+                .ok
+        );
+        assert!(
+            !session
+                .execute_line(r#"{"op":"analyze","paths":["x.ttf"],"options":{"typo":true}}"#)
+                .unwrap()
+                .ok
+        );
     }
 }

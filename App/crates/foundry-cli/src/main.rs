@@ -56,6 +56,24 @@ fn run(cli: args::Cli) -> Result<ExitCode, String> {
             println!("Wrote {}", out.display());
             Ok(ExitCode::SUCCESS)
         }
+        args::Cli::Analyze { paths, options } => {
+            let mut session = Session::new();
+            let data = ensure_ok(session.execute(Command::Analyze {
+                paths,
+                options: options.clone(),
+            }))?;
+            let report: foundry_core::analyze::Report =
+                serde_json::from_value(data).map_err(|e| e.to_string())?;
+            print!(
+                "{}",
+                foundry_core::analyze::render(&report, options.format)?
+            );
+            Ok(if report.errors.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         args::Cli::Info { path } => {
             let mut session = Session::new();
             let opened = session.execute(Command::Open {

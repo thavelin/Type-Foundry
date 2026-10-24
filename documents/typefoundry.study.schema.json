@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TypeFoundry outline study v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "algorithm",
+    "source",
+    "metadata",
+    "metrics",
+    "glyphs",
+    "classification",
+    "nearest",
+    "outliers",
+    "terminals",
+    "warnings"
+  ],
+  "properties": {
+    "format": {
+      "const": "typefoundry.study"
+    },
+    "version": {
+      "const": 2
+    },
+    "algorithm": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "face",
+        "instance",
+        "axes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "face": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "instance": {
+          "type": "string"
+        },
+        "axes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/metric"
+      }
+    },
+    "glyphs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/$defs/metric"
+        }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "required": [
+        "class",
+        "confidence",
+        "reasons",
+        "serif_type",
+        "method"
+      ],
+      "properties": {
+        "class": {
+          "enum": [
+            "geometric sans",
+            "grotesque",
+            "humanist sans",
+            "serif text",
+            "slab",
+            "mono",
+            "display",
+            "script"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "string"
+          }
+        },
+        "serif_type": {
+          "enum": [
+            null,
+            "none",
+            "bracketed",
+            "slab",
+            "hairline",
+            "wedge"
+          ]
+        },
+        "method": {
+          "type": "string"
+        }
+      }
+    },
+    "nearest": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "outliers": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "terminals": {
+      "type": "object"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "units",
+        "x_height_ratio",
+        "cap_height_ratio",
+        "method",
+        "glyphs",
+        "reason"
+      ],
+      "properties": {
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "x_height_ratio": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cap_height_ratio": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "units": {
+          "enum": [
+            "font_units",
+            "font_units_squared",
+            "ratio",
+            "degrees",
+            "count"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "glyphs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -23,7 +23,8 @@ use crate::font::{
 const ENGLISH_US: u16 = 0x0409;
 /// Extensions [`Font::load`] reads as a binary font.
 const IMPORT_EXTENSIONS: [&str; 6] = ["ttf", "otf", "ttc", "otc", "woff", "woff2"];
-const WOFF_HEADER: usize = 48;
+// WOFF 1.0 section 3: 44-byte header, followed immediately by table records.
+const WOFF_HEADER: usize = 44;
 const WOFF_ENTRY: usize = 20;
 
 fn extension(path: &Path) -> Option<String> {
@@ -60,11 +61,16 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
     let sfnt = sfnt_bytes(bytes)?;
     let face = Face::parse(&sfnt, 0).map_err(|err| format!("not a readable font: {err}"))?;
 
+    read_face(&face, fallback_name)
+}
+
+/// Read one selected face/location without changing its source.
+pub(crate) fn read_face(face: &Face<'_>, fallback_name: &str) -> Result<Font, String> {
     let upm = face.units_per_em();
     if !(MIN_UPM..=MAX_UPM).contains(&upm) {
         return Err(format!("units per em {upm} is outside {MIN_UPM}-{MAX_UPM}"));
     }
-    let names = family_and_style(&face);
+    let names = family_and_style(face);
     let name = match &names {
         Some((family, Some(style))) => format!("{family} {style}"),
         Some((family, None)) => family.clone(),
@@ -79,7 +85,7 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
     font.style.width = face.width().to_number().clamp(1, 9);
     font.style.italic = face.is_italic();
     font.style.italic_angle = f64::from(face.italic_angle());
-    apply_binary_info(&mut font, &face);
+    apply_binary_info(&mut font, face);
     font.metrics.ascender = f64::from(face.ascender());
     font.metrics.descender = f64::from(face.descender());
     if let Some(cap_height) = face.capital_height().filter(|value| *value > 0) {
@@ -90,8 +96,8 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
     }
     font.metrics.baseline = 0.0;
 
-    let unicodes = unicode_map(&face);
-    let post_names = post_names(&face);
+    let unicodes = unicode_map(face);
+    let post_names = post_names(face);
     let mut taken = BTreeMap::new();
     let mut glyphs = Vec::with_capacity(usize::from(face.number_of_glyphs()));
     for index in 0..face.number_of_glyphs() {
@@ -102,7 +108,7 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
             .and_then(|names| names.get(usize::from(index)).cloned().flatten());
         let name = match stored {
             Some(name) => unique_name(name, index, &mut taken),
-            None => unique_name(glyph_name(&face, id, unicode), index, &mut taken),
+            None => unique_name(glyph_name(face, id, unicode), index, &mut taken),
         };
         let mut pen = Pen::default();
         // `None` means the glyph has no outline, such as a space. That is not an error.
@@ -119,8 +125,8 @@ pub(crate) fn read_font_binary(bytes: &[u8], fallback_name: &str) -> Result<Font
         glyphs.push(glyph);
     }
     font.glyphs = glyphs;
-    import_kern(&face, &mut font);
-    import_ligatures(&face, &mut font);
+    import_kern(face, &mut font);
+    import_ligatures(face, &mut font);
     Ok(font)
 }
 
@@ -157,7 +163,7 @@ fn apply_binary_info(font: &mut Font, face: &Face<'_>) {
     }
 }
 
-fn name_text(face: &Face<'_>, id: u16) -> Option<String> {
+pub(crate) fn name_text(face: &Face<'_>, id: u16) -> Option<String> {
     let read = |english_only: bool| {
         face.names()
             .into_iter()
@@ -625,7 +631,7 @@ pub(crate) fn wrap_woff(sfnt: &[u8], compress: bool) -> Vec<u8> {
         entries.push((tag, checksum, length, stored));
     }
 
-    let data_at = 48 + num * 20;
+    let data_at = WOFF_HEADER + num * WOFF_ENTRY;
     let mut directory = Vec::new();
     let mut body = Vec::new();
     for (tag, checksum, orig_len, stored) in &entries {
@@ -636,7 +642,7 @@ pub(crate) fn wrap_woff(sfnt: &[u8], compress: bool) -> Vec<u8> {
         directory.extend_from_slice(&(*orig_len as u32).to_be_bytes());
         directory.extend_from_slice(&checksum.to_be_bytes());
         body.extend_from_slice(stored);
-        while (data_at + body.len()) % 4 != 0 {
+        while !(data_at + body.len()).is_multiple_of(4) {
             body.push(0);
         }
     }
@@ -650,7 +656,7 @@ pub(crate) fn wrap_woff(sfnt: &[u8], compress: bool) -> Vec<u8> {
     out.extend_from_slice(&(sfnt.len() as u32).to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&[0u8; 24]);
+    out.extend_from_slice(&[0u8; 20]);
     out.extend(directory);
     out.extend(body);
     assert_eq!(out.len(), total);
@@ -946,7 +952,7 @@ mod tests {
     fn woff_compressed_a_table(woff: &[u8]) -> bool {
         let num = usize::from(u16::from_be_bytes([woff[12], woff[13]]));
         (0..num).any(|index| {
-            let at = 48 + index * 20;
+            let at = WOFF_HEADER + index * WOFF_ENTRY;
             let comp = u32::from_be_bytes(woff[at + 8..at + 12].try_into().unwrap());
             let orig = u32::from_be_bytes(woff[at + 12..at + 16].try_into().unwrap());
             comp < orig
@@ -1006,7 +1012,7 @@ mod tests {
         let mut woff = wrap_woff(&fs::read(&ttf_path).unwrap(), true);
         let num = usize::from(u16::from_be_bytes([woff[12], woff[13]]));
         let flipped = (0..num).find_map(|index| {
-            let at = 48 + index * 20;
+            let at = WOFF_HEADER + index * WOFF_ENTRY;
             let offset = u32::from_be_bytes(woff[at + 4..at + 8].try_into().unwrap()) as usize;
             let comp = u32::from_be_bytes(woff[at + 8..at + 12].try_into().unwrap()) as usize;
             let orig = u32::from_be_bytes(woff[at + 12..at + 16].try_into().unwrap()) as usize;

@@ -11,12 +11,17 @@ base64 = "0.22"
 flate2 = "1"
 norad = "0.18"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 ttf-parser = "0.25"
 # Pure Rust WOFF2 unpacking. The output is an sfnt that the TrueType and CFF readers already take.
 wuff = "0.2"
 # Path outlines only. Text and system fonts stay off.
 usvg = { version = "0.45", default-features = false }
+
+kurbo = "0.13"
+tiny-skia = "0.11"
+rayon = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 # Pure Rust WOFF2 writer, used only to build test files.

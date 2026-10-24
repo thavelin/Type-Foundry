@@ -1,5 +1,6 @@
 //! Font documents and the blend operation that builds a new face from two compatible ones.
 
+pub mod analyze;
 mod blend;
 mod critique;
 mod diff;

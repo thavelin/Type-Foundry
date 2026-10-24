@@ -364,3 +364,190 @@ claude mcp add typefoundry -- /path/to/foundry-mcp
 ```
 
 Build it first, from `App/`: `cargo build --release -p foundry-mcp`. Pass tool paths with forward slashes, for example `{"path":"C:/fonts/Wide.ufo"}`.
+
+## Collection analyzer (study schema v2)
+
+`foundry analyze` reads fonts from disk independently of the editor session. It does
+not open a tab, change the active font, add undo history, save a font, export a font,
+or upload anything. Source outlines exist only transiently in memory. Reports and
+cache files contain measurements; optional PDF sheets contain a raster image,
+not reusable vector outlines. Existing differing outputs are refused. Identical
+outputs are accepted, so rerunning the same analysis is idempotent.
+
+```text
+foundry analyze /fonts --out /reports/study-01 --format md --cache-dir /reports/cache
+foundry analyze A.ttf B.ufo --glyphs n,o,H,O --format csv
+foundry analyze Variable.ttf --axes wght=600,wdth=90
+foundry analyze /fonts --weight-match 0.16 --out /reports/matched --sheets png,pdf
+```
+
+`--out` is a **directory**, not a filename. It receives `collection.json`, one
+`font-<source-id>.json` per analyzed face/location, and `report.json`, `report.csv`,
+or `report.md`. JSON per-font and collection outputs are always written, regardless
+of the selected convenience format. Without `--out`, the selected format goes to
+stdout. A partial success still produces its measurements and errors, and the CLI
+exits 1 if any inputs failed (0 for a complete scan, 2 for CLI syntax errors).
+
+Paths can be individual `.ttf`, `.otf`, `.ttc`, `.otc`, WOFF1 `.woff`, `.ufo`, and
+JSON files supported by `open`, or recursive directories. Collections analyze all
+faces. UFOs and recognized SVG glyph folders are atomic inputs. Symlinks, `.git`,
+and `target` folders are not followed. WOFF2 and EOT are refused by the analyzer,
+including WOFF2 binary data disguised as TTF; this restriction does not change
+`open`'s existing WOFF2 support. Bad paths and corrupt fonts are reported and the
+remaining files continue. Binary reads share the engine's existing importer.
+
+Variable fonts produce the default location plus each `fvar` named instance.
+`--axes` replaces that list with one location; unspecified axes retain defaults.
+Unknown axes, out-of-bounds coordinates and nonfinite values are errors.
+`--weight-match` selects the default/named instance closest in measured n stem /
+x-height, independently per collection face. Ties break by instance name. It is
+mutually exclusive with `--axes`. Static faces retain their actual weight and
+receive an explicit warning: changing their stem/x-height would require editing
+outlines. This option never synthesizes a new weight or claims a static face has
+been matched. Named coordinates and the selected instance are included in `source`.
+
+`--glyphs` is a comma-separated list of source names, literal characters, or
+`U+NNNN` tokens. It restricts per-glyph tables. The diagnostic reference glyphs
+remain available for font-level measurements/classification; excluded width-table
+entries are null. Unicode coverage and total glyph counts always describe the
+whole font. Use `--cache-dir` to opt into persistent measurement caching. Cache keys
+are SHA-256 over source content, measurement options, schema and algorithm version;
+UFO/SVG packages hash sorted relative filenames and contents. Output locations and
+format are excluded from keys. No timestamps or cache-hit flags enter results.
+Corrupt cache entries are ignored; differing files are never overwritten.
+
+### Run operations and MCP
+
+All four operations use the same `foundry-core::analyze` implementation through
+`foundry-api::Session::execute`; they need no open font and preserve session state.
+
+```json
+{"op":"analyze","paths":["/fonts"],"options":{"glyphs":["n","o","H","O"],"output":"/reports/study-01","format":"md","cache_dir":"/reports/cache","sheets":["png","pdf"]}}
+{"op":"classify_font","path":"/fonts/Example.ttf"}
+{"op":"compare_to_class","path":"/fonts/Target.ttf","class":"geometric sans","collection":["/reference-fonts"],"options":{}}
+{"op":"nearest_fonts","path":"/fonts/Target.ttf","collection":["/reference-fonts"],"options":{}}
+```
+
+MCP names are `analyze_fonts(paths, options)`, `classify_font(path)`,
+`compare_to_class(path, class, collection, options)`, and
+`nearest_fonts(path, collection, options)`. Reference paths are required for the
+last two because there is no hidden global collection or mutable class registry.
+These tools have read-only, nondestructive, idempotent, local-only annotations.
+`analyze_fonts` can write explicitly requested reports/cache; read-only refers to
+font sources and editor state. Comparison/nearest operations ignore `options.output`.
+Per-file failures appear in `errors`; a successful response can be partial. An
+invalid request or absent comparison class yields the normal command error.
+
+### Schemas and provenance
+
+Per font: `format: "typefoundry.study"`, `version: 2`,
+`algorithm: "outline-analyzer-0.1.0"`. Version 1 is deliberately not reused: an
+independent letterform-study workflow is being developed in the main checkout.
+This analyzer does not feed its v2 files to that workflow. The companion
+[typefoundry.study.schema.json](typefoundry.study.schema.json) defines the serialized
+contract. The aggregate uses `format: "typefoundry.collection-study"`, version 2.
+
+Every numeric metric contains `value` (number or null), `units`, `method`, `glyphs`,
+`reason` (string for unavailable values, otherwise null), `x_height_ratio`, and
+`cap_height_ratio`. Lengths retain font units and both height normalizations;
+dimensionless values have units `ratio`. Angles are degrees, areas are squared font
+units, counts are `count`. Zero remains a measured zero; missing glyphs, empty
+outlines, undefined divisions and ambiguous geometry return null with a reason.
+No metrics use rendered pixels, hinting or optical raster comparisons.
+
+Metadata includes family/style, weight/width classes, italic angle, UPM, declared
+vertical metrics, raw OS/2/hhea metrics and line gaps, glyph count, complete cmap
+coverage by Unicode 17.0 block, GSUB/GPOS feature tags, license, and RFN detection.
+RFN detection searches the license string; it is not a legal determination, and a
+missing license gives null. Source fields that do not exist are null. GPOS counts
+are stored PairPos records and class matrix dimensions (including class zero),
+with extension lookups resolved; contextual applicability and expanded class-pair
+coverage are not implied. The legacy pair count and nonzero class cells are also
+reported. Document feature tags are extracted from feature declarations.
+
+### Measurement methods and limits
+
+- Bounds and ray crossings solve actual line/quadratic/cubic Beziers using `kurbo`.
+  Bounds use analytic extrema, not control-point hulls. Stem values are the median
+  minimum filled horizontal span at 25/40/60% glyph height. H/e bars and o top use
+  the minimum filled span on the central vertical ray. Contrast requires an o
+  counter. Stress samples 180 radial directions; monoline o stress is undefined.
+- Width tables cover a-z, A-Z and 0-9, including advances, exact ink widths,
+  n/H-relative widths and bearings; every selected source glyph gets darkness,
+  bearings, point count and quality measurements. Overshoots on o/O/s/a are signed
+  exact extrema relative to x-height/cap-height and the baseline.
+- The n arch profile samples the top filled interval at 10/20/50/90% across the
+  counter gap defined at 30% height. Springing height and minimum arch thickness
+  use 99 interior samples. Inner radii use analytic curvature sampled 99 times per
+  segment; n uses concave segments of its open counter. Counter rise is explicitly
+  defined in each method field; o/O currently report the distance below the counter
+  top at the indicated inward offset. Superellipse fitting is axis-aligned least
+  squares, p=0.50..8.00 in 0.01 increments. Handle fractions summarize first handles on the inner contour; n uses its
+  concave open-counter segments.
+- Terminal cut angles are short, corner-bounded straight segments in the expected
+  opening region, with the rightmost candidate selected. The `terminals` map also
+  lists candidate angles and a low heuristic confidence. Straight cuts classify as
+  horizontal, vertical, or angled. Ball, taper, serif and spur terminal segmentation
+  remains ambiguous and returns null rather than an invented label.
+- Join/waist thinning is a central-band minimum/median horizontal-thickness proxy,
+  not a skeleton-based anatomical join measurement. Foot extensions on n/H/I detect
+  serifs; foot thickness and local curved/sloping segments distinguish bracketed,
+  slab, hairline and wedge heuristically.
+- Areas use exact signed Bezier integrals. Detected overlapping contours use adaptive
+  integration of analytic nonzero-winding spans (relative tolerance 1e-8, recursion
+  depth 16). Overlap flags use the engine's 12-step polygon crossing check plus
+  same-winding nested-contour detection, so tiny intersections/tangencies can be
+  missed. Darkness is ink area / advance and relative to n/H. Texture greyness is
+  total area / (unshaped advances * declared ascender-minus-descender) for the fixed
+  pangram plus digits; no shaping, kerning or hinting is applied.
+- Quality reports >1-degree tangent breaks at source smooth points, near-zero Bezier
+  segments (<1e-6 UPM), point counts, interior extrema needing explicit split points,
+  clockwise/counterclockwise contour counts and approximate overlap flags. Binary
+  import cannot preserve authoring smooth flags, so its kink count does not certify
+  smoothness. Short segments include curves, using integrated arclength.
+
+Classification is a deterministic, transparent ruleset, not a trained classifier.
+It emits one of geometric sans, grotesque, humanist sans, serif text, slab, mono,
+display or script, with three reasons and an **uncalibrated** confidence. Mono uses
+equal ASCII alphanumeric advances; other classes use roundness, modulation/stress,
+foot extensions and extreme proportions. Script requires declared cursive attachment
+and a slanted design; it is conservative. Missing evidence lowers confidence.
+Real designs that mix categories can be misclassified; inspect reasons and specimen.
+
+### Collection calculations
+
+Each style group reports min/median/max and the families/locations setting extrema.
+Font-unit lengths are divided by each font's x-height before cross-font comparison;
+ratios are unchanged. Nearest-family distance is RMS feature differences divided by
+fixed scales: x/cap 0.15, cap/UPM 0.15, stem/x 0.08, contrast 1.0, o-width/x 0.25,
+serif extension 0.4, n/H advance ratio 0.2. At least four shared features are required;
+results exclude the target's own family and deduplicate other families, keeping five.
+The three largest standardized differences accompany each match.
+
+Outliers use a leave-one-family-out observed class range with at least three peer
+faces; a font cannot define its own acceptable limits. A comparison target is not
+added to its reference collection. Comparisons list in-range and out-of-range
+metrics sorted by absolute deviation divided by max(class span, 5% median, 0.0001).
+Possible universals require at least two classes, complete measurements on all faces,
+and total range <=2% of max(abs(median), 0.01). They describe this sample, not a
+universal law of type design; tiny samples should not be treated as normative.
+
+### Optional sheets and validation
+
+`--sheets png,pdf` requires `--out`. Each selected face/location gets a specimen,
+n/o and H/O baseline overlays, blue-to-red horizontal thickness sampling, nHn/oHo/
+HHH/OHO spacing strips, a greyness strip, and o/O inner-curvature combs. These
+visuals are rasterized from transient outlines **after** measurement; they do not
+supply any numeric metric. Missing specimen glyphs are skipped; reports record the
+missing numeric evidence. PDFs embed pixels only. Source hashes are rechecked
+before rendering to catch source changes during a scan.
+
+Fixtures are original procedural shapes; no third-party outlines are included.
+Tests cover geometric/humanist/serif/mono classes, a real gvar variable stem,
+collections, WOFF1, UFO, Bezier bounds/area, overlap integration, UPM invariance,
+missing glyphs, Unicode blocks, option parsing, source/session preservation,
+MCP dispatch, corrupt-file continuation and identical cached reruns. Rebuild the
+small binary fixtures with `tests/fixtures/generate_variable.py` (fontTools is needed
+only to regenerate them). Sources for format/data definitions:
+[WOFF 1.0](https://www.w3.org/TR/WOFF/#WOFFHeader),
+[Unicode 17 Blocks](https://www.unicode.org/Public/17.0.0/ucd/Blocks.txt).

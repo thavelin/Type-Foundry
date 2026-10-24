@@ -109,6 +109,10 @@ impl Server {
             Some(_) => return Err((INVALID_PARAMS, "arguments must be an object".to_string())),
         };
         let op = match name {
+            "analyze_fonts" => "analyze",
+            "classify_font" => "classify_font",
+            "compare_to_class" => "compare_to_class",
+            "nearest_fonts" => "nearest_fonts",
             "font_create" => "create",
             "font_open" => "open",
             "font_save" => "save",
@@ -905,6 +909,31 @@ fn tool_list() -> Value {
     ]) {
         tools.extend(more);
     }
+    let options = json!({"type":"object","additionalProperties":false,"properties":{"glyphs":{"type":"array","items":{"type":"string"}},"axes":{"type":"object","additionalProperties":{"type":"number"}},"weight_match":{"type":"number","exclusiveMinimum":0},"output":{"type":"string"},"format":{"enum":["json","csv","md"]},"cache_dir":{"type":"string"},"sheets":{"type":"array","items":{"enum":["png","pdf"]}}}});
+    for (name, required, properties) in [
+        (
+            "analyze_fonts",
+            json!(["paths"]),
+            json!({"paths":{"type":"array","minItems":1,"items":{"type":"string"}},"options":options}),
+        ),
+        (
+            "classify_font",
+            json!(["path"]),
+            json!({"path":{"type":"string"}}),
+        ),
+        (
+            "compare_to_class",
+            json!(["path", "class", "collection"]),
+            json!({"path":{"type":"string"},"class":{"type":"string"},"collection":{"type":"array","minItems":1,"items":{"type":"string"}},"options":options}),
+        ),
+        (
+            "nearest_fonts",
+            json!(["path", "collection"]),
+            json!({"path":{"type":"string"},"collection":{"type":"array","minItems":1,"items":{"type":"string"}},"options":options}),
+        ),
+    ] {
+        tools.push(json!({"name":name,"description":"Read-only vector measurements and heuristic collection classification. Returns typefoundry.study v2; per-file failures appear in errors.","inputSchema":{"type":"object","required":required,"properties":properties,"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}));
+    }
     Value::Array(tools)
 }
 
@@ -1004,7 +1033,7 @@ mod tests {
         assert!(names.contains(&"decision_record"));
         assert!(names.contains(&"font_critique"));
         assert!(names.contains(&"critique_resolve"));
-        assert_eq!(names.len(), 52);
+        assert_eq!(names.len(), 56);
         assert!(names.contains(&"style_derive"));
         assert!(!names.iter().any(|name| name.contains("prompt")));
     }
@@ -1156,5 +1185,35 @@ mod tests {
         assert_eq!(check["data"]["styles"], json!(["Regular", "Italic"]));
 
         let _ = fs::remove_dir_all(dir);
+    }
+}
+#[cfg(test)]
+mod analyzer_tool_tests {
+    use super::*;
+    #[test]
+    fn analyzer_tools_are_read_only_and_all_dispatch() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../foundry-core/tests/fixtures/OriginalVariable.ttf")
+            .to_string_lossy()
+            .into_owned();
+        let mut server = Server::new();
+        let tools = tool_list();
+        let tools = tools.as_array().unwrap();
+        for (id, name, args) in [
+            (1, "analyze_fonts", json!({"paths":[path]})),
+            (2, "classify_font", json!({"path":path})),
+            (3, "nearest_fonts", json!({"path":path,"collection":[path]})),
+            (
+                4,
+                "compare_to_class",
+                json!({"path":path,"class":"grotesque","collection":[path]}),
+            ),
+        ] {
+            let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
+            let reply=server.handle_message(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+        }
+        assert!(server.session.font().is_none());
     }
 }
